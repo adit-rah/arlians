@@ -1,3 +1,7 @@
 numpy>=1.26
 scipy>=1.12
 opensimplex>=0.4
+# sim layer / learner (added for the agent build; torch ships cp314 wheels as of 2026)
+torch>=2.12
+imageio>=2.34
+pytest>=8.0
