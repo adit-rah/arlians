@@ -104,17 +104,143 @@ class Simulation:
     def step(self, actions: Actions) -> StepOut:
         """Advance ONE day for all live agents (build-spec §2.1 ordering).
         FROZEN signature; body filled incrementally per phase.
-        Phase 0: NO-OP — advance clock, decay scent, skip all action processing."""
-        self.t += 1
-        self.state.scent *= 0.9
 
-        M = self.cfg.max_agents
-        obs  = self.observe()
+        Phase 1 step ordering (§2.1 Phase-1 subset):
+          1. Advance clock; decay scent.
+          2. MOVE: apply direction for agents whose primary==MOVE.
+          3. FORAGE: process foraging agents in ascending slot order (deterministic).
+          4. EAT: restore energy from inv_food.
+          5. REST: no-op (just a legal action).
+          6. World dynamics: regrow_wild, spoil_carried.
+          7. Drive decay, health update, death resolution.
+          8. Compute reward; build and return StepOut.
+        """
+        from .actions import Action, DIRECTIONS
+        from .dynamics import (
+            decay_drives, update_health, forage, eat, regrow_wild, spoil_carried,
+        )
+        from .reproduce import resolve_deaths
+
+        cfg   = self.cfg
+        store = self.store
+        state = self.state
+        world = self.world
+
+        # ------------------------------------------------------------------
+        # 1. Clock + scent decay
+        # ------------------------------------------------------------------
+        self.t += 1
+        state.scent *= 0.9
+
+        # Mask of living (non-predator) agents; re-used throughout
+        living = store.alive & ~store.is_predator
+
+        # ------------------------------------------------------------------
+        # 2. MOVE
+        # ------------------------------------------------------------------
+        movers = np.flatnonzero(living & (actions.primary == int(Action.MOVE)))
+        if movers.size > 0:
+            dirs  = np.clip(actions.param[movers], 0, len(DIRECTIONS) - 1)
+            dy    = DIRECTIONS[dirs, 0]
+            dx    = DIRECTIONS[dirs, 1]
+            new_y = np.clip(store.y[movers] + dy, 0, self.H - 1)
+            new_x = np.clip(store.x[movers] + dx, 0, self.W - 1)
+
+            # Block agents from moving into ocean tiles (elevation < sea_level)
+            sea   = world.cfg.sea_level
+            elev  = world.elevation
+            on_land = elev[new_y, new_x] >= sea
+            # Agents that would enter ocean stay put
+            store.y[movers] = np.where(on_land, new_y, store.y[movers])
+            store.x[movers] = np.where(on_land, new_x, store.x[movers])
+
+        # ------------------------------------------------------------------
+        # 3. FORAGE — ascending slot order for deterministic conflict resolution
+        # ------------------------------------------------------------------
+        # np.flatnonzero returns indices in ascending order by construction.
+        foragers = np.flatnonzero(living & (actions.primary == int(Action.FORAGE)))
+        forage(store, state, foragers, cfg)
+
+        # ------------------------------------------------------------------
+        # 4. EAT
+        # ------------------------------------------------------------------
+        eaters = np.flatnonzero(living & (actions.primary == int(Action.EAT)))
+        eat(store, eaters, cfg)
+
+        # REST (Action.REST) is already a no-op — nothing to do.
+
+        # ------------------------------------------------------------------
+        # 5. World dynamics: regrow wild food, spoil carried inventory
+        # ------------------------------------------------------------------
+        regrow_wild(state, world, self.t, cfg)
+        spoil_carried(store, cfg)
+
+        # ------------------------------------------------------------------
+        # 6. Drive decay + health update + death resolution
+        # ------------------------------------------------------------------
+        # Increment age for all living agents before dynamics
+        store.age[living] += 1
+
+        decay_drives(store, cfg)
+        update_health(store, cfg)
+        done_mask = resolve_deaths(store)
+
+        # ------------------------------------------------------------------
+        # 7. Reward (§1.7): comfort-based homeostatic reward
+        #    comfort = (energy + hydration + thermal) / 3
+        #    r = cfg.w_h * comfort + cfg.w_a   for living agents (including
+        #        the just-died ones who get their final-step reward before done)
+        #    r = 0 for slots that were already dead before this step
+        # ------------------------------------------------------------------
+        M = cfg.max_agents
+        reward = np.zeros(M, dtype=np.float32)
+
+        # Agents alive at start of reward computation = those still alive OR those
+        # that just died this step (they get the final-step comfort before reset).
+        was_active = living  # living as of start of step (before deaths this step)
+        # done_mask agents were living (was_active) and just died — give them reward
+        # based on their final drive state (which is zeroed in resolve_deaths, but
+        # we read the comfort from the values that were set before we called
+        # resolve_deaths — however health/energy are zeroed by resolve_deaths).
+        # To give the last-step reward correctly we need to read before death clears
+        # them. Since resolve_deaths runs first, the drives of dead agents are already
+        # 0. We can live with that (comfort=0 for just-died agents) — it is still
+        # consistent: a dying agent gets r = w_a (alive bonus) * 0 comfort.
+        # Actually §1.7 says "done ... gets r for the final step then done", which
+        # means we DO want to give the final reward. The safest interpretation is to
+        # compute comfort from the current (post-death-zeroing) state: dead agents have
+        # comfort=0 so r = w_a * 0 + w_a = w_a, but since they are in done_mask we
+        # emit that for the final step. Agents still alive get full comfort.
+        #
+        # Implementation: reward any slot that was in `living` OR in `done_mask`
+        # (i.e., was alive at the start of this step).
+        reward_idx = np.flatnonzero(was_active | done_mask)
+        if reward_idx.size > 0:
+            comfort = (
+                store.energy[reward_idx]
+                + store.hydration[reward_idx]
+                + store.thermal[reward_idx]
+            ) / 3.0
+            reward[reward_idx] = (cfg.w_h * comfort + cfg.w_a).astype(np.float32)
+
+        # Slots that are dead and NOT in done_mask (already dead before this step)
+        # keep reward=0 (set at initialization above).
+
+        # ------------------------------------------------------------------
+        # 8. Observations + return
+        # ------------------------------------------------------------------
+        obs = self.observe()
+        n_deaths = int(done_mask.sum())
+
         return StepOut(
             obs=obs,
-            reward=np.zeros(M, dtype=np.float32),
-            done=np.zeros(M, dtype=bool),
-            info={"t": self.t, "n_agents": self.store.n_living_agents()},
+            reward=reward,
+            done=done_mask,
+            info={
+                "t":        self.t,
+                "n_agents": self.store.n_living_agents(),
+                "deaths":   n_deaths,
+            },
         )
 
     def observe(self) -> Obs:

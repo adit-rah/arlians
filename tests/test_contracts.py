@@ -81,10 +81,19 @@ def test_action_space_layout():
     assert StructureType.WALL == 3
 
 
-def test_build_mask_is_phased_stub():
+def test_build_mask_phase1_implemented():
+    """Phase 1: build_mask is now implemented; calling with None world/state/store
+    will raise an AttributeError (not NotImplementedError) since the body
+    accesses store.alive etc.  Verify the stub is gone."""
     c = SimConfig()
-    with pytest.raises(NotImplementedError):
+    # build_mask no longer raises NotImplementedError — it is a live implementation.
+    # Calling with all-None args will AttributeError at store.alive; that is fine.
+    try:
         actions.build_mask(None, None, None, c)
+    except NotImplementedError:
+        raise AssertionError("build_mask must be implemented for Phase 1 — NotImplementedError should not be raised")
+    except Exception:
+        pass  # AttributeError or similar is expected with None inputs
 
 
 # ---------------- observation layout ----------------
@@ -140,10 +149,12 @@ def test_simulation_phased_methods_are_stubs():
     assert isinstance(obs, Obs)
     obs2 = sim.observe()
     assert isinstance(obs2, Obs)
-    # build_mask is still a later-phase stub
-    with pytest.raises(NotImplementedError):
-        from sim import actions
-        actions.build_mask(None, None, None, sim.cfg)
+    # Phase 1: build_mask is now implemented — it should NOT raise NotImplementedError.
+    from sim import actions
+    mask = actions.build_mask(w, sim.state, sim.store, sim.cfg)
+    M = sim.cfg.max_agents
+    from sim.actions import N_PRIMARY
+    assert mask.shape == (M, N_PRIMARY)
 
 
 def test_dataclass_contracts_exist():

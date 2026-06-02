@@ -66,5 +66,37 @@ def build_mask(world, state, store, cfg: SimConfig) -> np.ndarray:
     FROZEN: signature + return shape. Implementation is phased (Phase 1+ fill rules:
     HARVEST only where crop_stage>=1, REPRODUCE only if energy>=threshold & cd==0 &
     a free slot exists, BUILD only with sufficient inventory, etc.).
+
+    Phase 1 rules:
+      - Dead slots: all False.
+      - NOOP, MOVE, REST: always True for living agents.
+      - FORAGE: True only if wild_remaining[tile] > 0.
+      - EAT: True only if inv_food > 0.
+      - All other actions (DRINK, PLANT, HARVEST, BUILD, CRAFT, STORE, RETRIEVE,
+        ATTACK, REPRODUCE): False until their phase is implemented.
     """
-    raise NotImplementedError("build_mask is implemented incrementally per phase")
+    M = cfg.max_agents
+    mask = np.zeros((M, N_PRIMARY), dtype=bool)
+
+    living = store.alive & ~store.is_predator
+    if not living.any():
+        return mask
+
+    live_idx = np.flatnonzero(living)
+
+    # NOOP, MOVE, REST always allowed
+    mask[live_idx, Action.NOOP]  = True
+    mask[live_idx, Action.MOVE]  = True
+    mask[live_idx, Action.REST]  = True
+
+    # FORAGE: only where wild_remaining > 0 at agent's tile
+    ys = store.y[live_idx]
+    xs = store.x[live_idx]
+    has_wild = state.wild_remaining[ys, xs] > 0.0
+    mask[live_idx[has_wild], Action.FORAGE] = True
+
+    # EAT: only if carrying food
+    has_food = store.inv_food[live_idx] > 0.0
+    mask[live_idx[has_food], Action.EAT] = True
+
+    return mask
