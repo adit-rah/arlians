@@ -101,6 +101,44 @@ class Simulation:
 
         return self.observe()
 
+    def respawn_dead(self, seed: Optional[int] = None, target: Optional[int] = None) -> np.ndarray:
+        """Phase 1-4 training auto-reset: top the population back up to `target`
+        (default `cfg.init_agents`) by spawning fresh agents into empty slots at
+        spawn-eligible land tiles.
+
+        This is the per-slot "auto-reset" of the continuing-stream PPO env (build-spec
+        §3.2): before reproduction exists (Phase 5), dead slots are refilled this way so
+        the population stays trainable. At Phase 5, REPRODUCE supplies births instead and
+        this is disabled. Returns the indices of newly spawned slots.
+        """
+        tgt = self.cfg.init_agents if target is None else target
+        deficit = tgt - self.store.n_living_agents()
+        if deficit <= 0:
+            return np.empty(0, dtype=np.int64)
+        free = self.store.free_slots()
+        if free.size == 0:
+            return np.empty(0, dtype=np.int64)
+        slots = free[:deficit]
+
+        land_ys, land_xs = np.where(self.world.elevation >= self.world.cfg.sea_level)
+        rng = np.random.default_rng(seed)
+        chosen = rng.integers(0, land_ys.shape[0], size=slots.size)
+
+        self.store.alive[slots]       = True
+        self.store.is_predator[slots] = False
+        self.store.y[slots]           = land_ys[chosen]
+        self.store.x[slots]           = land_xs[chosen]
+        self.store.energy[slots]      = 1.0
+        self.store.hydration[slots]   = 1.0
+        self.store.thermal[slots]     = 1.0
+        self.store.health[slots]      = 1.0
+        self.store.age[slots]         = 0
+        self.store.inv_food[slots]    = 0.0
+        self.store.genome[slots]      = 0.5
+        self.store.lineage_id[slots]  = slots
+        self.store.repro_cd[slots]    = 0
+        return slots
+
     def step(self, actions: Actions) -> StepOut:
         """Advance ONE day for all live agents (build-spec §2.1 ordering).
         FROZEN signature; body filled incrementally per phase.
