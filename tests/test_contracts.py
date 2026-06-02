@@ -135,10 +135,15 @@ def test_simulation_phased_methods_are_stubs():
     from world import World, WorldConfig
     w = World.generate(WorldConfig(width=64, height=64, seed=1))
     sim = Simulation(w, SimConfig(max_agents=16, init_agents=8))
+    # Phase 0 is implemented: reset() and observe() (via build_observation) work.
+    obs = sim.reset()
+    assert isinstance(obs, Obs)
+    obs2 = sim.observe()
+    assert isinstance(obs2, Obs)
+    # build_mask is still a later-phase stub
     with pytest.raises(NotImplementedError):
-        sim.reset()
-    with pytest.raises(NotImplementedError):
-        sim.observe()  # delegates to observe.build_observation (Phase 0)
+        from sim import actions
+        actions.build_mask(None, None, None, sim.cfg)
 
 
 def test_dataclass_contracts_exist():
