@@ -64,6 +64,8 @@ class SimConfig:
     structure_decay: float = 0.001      # hp/step
     shelter_exposure_mult: float = 0.1  # exposure damage multiplier for sheltered occupants
     shelter_temp_bonus: float = 0.3     # added to effective temperature when sheltered
+    structure_init_hp: float = 1.0      # hp of a freshly built structure
+    material_capacity: float = 10.0     # max inv_wood / inv_stone / inv_minerals each (×genome capacity)
 
     # ----- combat -----
     attack_damage: float = 0.15
