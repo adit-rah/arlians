@@ -64,6 +64,19 @@ class MetricsLogger:
         Fraction of living-agent-steps spent on tiles with
         ``world.base_resources["water_proximity"] >= 0.6``.  Settlement near
         water → high value; random/inland wandering → low value.  In [0, 1].
+
+    Phase 3 new keys in year_summary()
+    ------------------------------------
+    ``pct_calories_farmed``
+        Fraction of total food calories (foraged + harvested) that came from
+        harvested crops this year.  0.0 if no food was consumed at all.
+        In [0, 1].
+
+    ``fertile_occupancy``
+        Fraction of living-agent-steps spent on tiles with
+        ``world.base_resources["soil_fertility"] >= 0.6``.  Settlement-on-
+        fertile signal; mirrors how ``water_occupancy`` is computed.
+        In [0, 1].
     """
 
     def __init__(self, out_path: Optional[str] = None) -> None:
@@ -74,7 +87,7 @@ class MetricsLogger:
     # Public API
     # ------------------------------------------------------------------
 
-    def record_step(self, sim) -> None:
+    def record_step(self, sim, info=None) -> None:
         """Accumulate statistics for the current simulation step.
 
         Parameters
@@ -82,6 +95,11 @@ class MetricsLogger:
         sim : sim.simulation.Simulation
             The live simulation object.  Reads from ``sim.store`` and
             ``sim.state``.
+        info : dict or None
+            Optional per-step info dict from ``StepOut.info``.  When provided,
+            ``info.get("foraged", 0)`` and ``info.get("harvested", 0)`` are
+            accumulated into the calorie-source-split totals for the year.
+            Existing single-argument call sites pass nothing and are unaffected.
         """
         store = sim.store
         state = sim.state
@@ -143,6 +161,28 @@ class MetricsLogger:
         self._water_on_steps += on_water
         self._water_total_steps += total
 
+        # --- fertile occupancy (Phase 3) ---
+        # Fraction of living-agent-steps spent on tiles with soil_fertility >= 0.6.
+        # Settlement-on-fertile signal (mirrors water_occupancy pattern).
+        if live_idx.size > 0:
+            soil_fert = world.base_resources["soil_fertility"]
+            ys = store.y[live_idx]
+            xs = store.x[live_idx]
+            on_fertile = float((soil_fert[ys, xs] >= 0.6).sum())
+            fertile_total = float(live_idx.size)
+        else:
+            on_fertile = 0.0
+            fertile_total = 0.0
+        self._fertile_on_steps += on_fertile
+        self._fertile_total_steps += fertile_total
+
+        # --- calorie-source split (Phase 3) ---
+        # Accumulate foraged and harvested food totals from the per-step info dict
+        # so we can compute pct_calories_farmed in year_summary.
+        if info is not None:
+            self._foraged_total  += float(info.get("foraged",  0))
+            self._harvested_total += float(info.get("harvested", 0))
+
     def year_summary(self) -> Dict[str, Any]:
         """Aggregate the accumulated steps into a per-year statistics dict.
 
@@ -163,10 +203,14 @@ class MetricsLogger:
           steps this year (patch-depletion signal).
         - ``water_occupancy`` — fraction of living-agent-steps on tiles with
           water_proximity >= 0.6 (water-anchoring signal, Phase 2). In [0, 1].
+        - ``pct_calories_farmed`` — fraction of total food from harvested crops
+          this year (calorie-source split, Phase 3). In [0, 1].
+        - ``fertile_occupancy`` — fraction of living-agent-steps on tiles with
+          soil_fertility >= 0.6 (settlement-on-fertile signal, Phase 3). In [0, 1].
 
         The dict is intentionally open: later phases add keys
-        (``pct_calories_farmed``, ``winter_survival_rate``,
-        ``settlement_clustering``, ...) without reshaping existing structure.
+        (``winter_survival_rate``, ``settlement_clustering``, ...) without
+        reshaping existing structure.
 
         Returns
         -------
@@ -197,6 +241,20 @@ class MetricsLogger:
         else:
             water_occupancy = 0.0
 
+        # --- Phase 3 metrics ---
+        # pct_calories_farmed: fraction of food calories from harvested crops.
+        total_food = self._harvested_total + self._foraged_total
+        if total_food > 0.0:
+            pct_calories_farmed = float(self._harvested_total / total_food)
+        else:
+            pct_calories_farmed = 0.0
+
+        # fertile_occupancy: fraction of living-agent-steps on soil_fertility >= 0.6 tiles.
+        if self._fertile_total_steps > 0:
+            fertile_occupancy = float(self._fertile_on_steps / self._fertile_total_steps)
+        else:
+            fertile_occupancy = 0.0
+
         summary: Dict[str, Any] = {
             "population_mean":  pop_mean,
             "population_min":   pop_min,
@@ -206,6 +264,8 @@ class MetricsLogger:
             "mean_displacement": mean_displacement,
             "wild_food_mean":    wild_food_mean,
             "water_occupancy":   water_occupancy,
+            "pct_calories_farmed": pct_calories_farmed,
+            "fertile_occupancy":   fertile_occupancy,
         }
 
         if self.out_path is not None:
@@ -234,3 +294,8 @@ class MetricsLogger:
         # Phase 2 accumulators
         self._water_on_steps: float = 0.0    # agent-steps spent on water_proximity >= 0.6
         self._water_total_steps: float = 0.0  # total living-agent-steps this year
+        # Phase 3 accumulators
+        self._foraged_total: float = 0.0      # total food units foraged from wild this year
+        self._harvested_total: float = 0.0    # total food units harvested from crops this year
+        self._fertile_on_steps: float = 0.0   # agent-steps on soil_fertility >= 0.6 tiles
+        self._fertile_total_steps: float = 0.0  # total living-agent-steps this year
