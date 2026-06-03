@@ -235,3 +235,123 @@ def spoil_carried(store: EntityStore, cfg: SimConfig) -> None:
     store.inv_food[living] = np.maximum(
         store.inv_food[living] - cfg.spoilage_carried, 0.0
     ).astype(np.float32)
+
+
+# ---------------------------------------------------------------------------
+# Phase 3 crop dynamics
+# ---------------------------------------------------------------------------
+
+def crop_step(state: WorldState, world, t: int, cfg: SimConfig) -> None:
+    """
+    Advance crop growth and apply winter-failure rot — vectorized over the grid.
+
+    Per §2.3:
+      eff_fert = soil_fertility * fertility_modifier(t)
+      growth   = crop_base_growth * eff_fert * water_proximity
+      crop_stage[growing] = min(1.0, crop_stage + growth)
+
+      rot condition: growing tile AND eff_fert < crop_min_fertility
+      crop_health[rot] -= crop_rot
+
+      Fully-rotted tiles (crop_health <= 0): clear crop_stage, crop_health, crop_owner.
+    """
+    from world.seasons import compute_season_state
+
+    season = compute_season_state(t, world.cfg)
+    soil_fertility  = world.base_resources["soil_fertility"]          # (H, W) f32
+    water_proximity = world.base_resources["water_proximity"]         # (H, W) f32
+
+    eff_fert = (soil_fertility * season.fertility_modifier).astype(np.float32)
+
+    growing = state.crop_stage > 0.0  # (H, W) bool
+
+    # Growth on all growing tiles
+    growth = (cfg.crop_base_growth * eff_fert * water_proximity).astype(np.float32)
+    new_stage = np.where(growing, np.minimum(1.0, state.crop_stage + growth), state.crop_stage)
+    state.crop_stage[:] = new_stage.astype(np.float32)
+
+    # Rot: growing AND eff_fert below threshold
+    rot = growing & (eff_fert < cfg.crop_min_fertility)
+    state.crop_health[rot] = (state.crop_health[rot] - cfg.crop_rot).astype(np.float32)
+
+    # Clear fully-rotted tiles
+    dead = state.crop_health <= 0.0
+    clear = growing & dead
+    state.crop_stage[clear]  = 0.0
+    state.crop_health[clear] = 0.0
+    state.crop_owner[clear]  = -1
+
+
+def plant(
+    store: EntityStore,
+    state: WorldState,
+    idx: np.ndarray,
+    cfg: SimConfig,
+) -> int:
+    """
+    Execute PLANT for agents in `idx` (chose PLANT action).
+
+    For each agent (ascending slot order for determinism):
+      - If the agent's tile has crop_stage == 0 (empty): plant a seed.
+        crop_stage = 0.01 (tiny init so it is "growing")
+        crop_health = 1.0
+        crop_owner  = agent's lineage_id
+      - If the tile is already occupied by a crop: no-op.
+
+    Returns total count of tiles planted this step.
+    """
+    if idx.size == 0:
+        return 0
+
+    # idx from np.flatnonzero is already ascending; process in that order.
+    planted = 0
+    for slot in idx:
+        y = int(store.y[slot])
+        x = int(store.x[slot])
+        if state.crop_stage[y, x] == 0.0:
+            state.crop_stage[y, x]  = np.float32(0.01)
+            state.crop_health[y, x] = np.float32(1.0)
+            state.crop_owner[y, x]  = int(store.lineage_id[slot])
+            planted += 1
+    return planted
+
+
+def harvest(
+    store: EntityStore,
+    state: WorldState,
+    idx: np.ndarray,
+    cfg: SimConfig,
+) -> float:
+    """
+    Execute HARVEST for agents in `idx` (chose HARVEST action).
+
+    For each agent (ascending slot order for determinism):
+      - If the agent's tile has crop_stage >= 1.0 (mature):
+          food_yield = cfg.crop_yield * crop_stage * crop_health
+          inv_food[slot] += food_yield, capped at carry_capacity * genome capacity
+          Clear tile: crop_stage=0, crop_health=0, crop_owner=-1
+      - Otherwise: no-op (immature tile).
+
+    Returns total food harvested this step.
+    """
+    if idx.size == 0:
+        return 0.0
+
+    traits = traits_from_genome(store.genome)
+    total_harvested = 0.0
+
+    for slot in idx:
+        y = int(store.y[slot])
+        x = int(store.x[slot])
+        if state.crop_stage[y, x] >= 1.0:
+            food_yield = float(cfg.crop_yield * state.crop_stage[y, x] * state.crop_health[y, x])
+            cap = float(cfg.carry_capacity * traits.capacity[slot])
+            room = cap - float(store.inv_food[slot])
+            gain = min(food_yield, max(0.0, room))
+            store.inv_food[slot] = np.float32(min(cap, float(store.inv_food[slot]) + gain))
+            total_harvested += gain
+            # Clear the tile
+            state.crop_stage[y, x]  = np.float32(0.0)
+            state.crop_health[y, x] = np.float32(0.0)
+            state.crop_owner[y, x]  = np.int32(-1)
+    return float(total_harvested)

@@ -156,6 +156,7 @@ class Simulation:
         from .actions import Action, DIRECTIONS
         from .dynamics import (
             decay_drives, update_health, forage, eat, drink, regrow_wild, spoil_carried,
+            crop_step, plant, harvest,
         )
         from .reproduce import resolve_deaths
 
@@ -197,7 +198,23 @@ class Simulation:
         # ------------------------------------------------------------------
         # np.flatnonzero returns indices in ascending order by construction.
         foragers = np.flatnonzero(living & (actions.primary == int(Action.FORAGE)))
+        # Snapshot wild_remaining sum before forage to compute foraged_total
+        _wild_before = float(state.wild_remaining.sum()) if foragers.size > 0 else 0.0
         forage(store, state, foragers, cfg)
+        _wild_after = float(state.wild_remaining.sum()) if foragers.size > 0 else 0.0
+        foraged_total = max(0.0, _wild_before - _wild_after)
+
+        # ------------------------------------------------------------------
+        # 3b. PLANT — ascending slot order
+        # ------------------------------------------------------------------
+        planters = np.flatnonzero(living & (actions.primary == int(Action.PLANT)))
+        planted_total = plant(store, state, planters, cfg)
+
+        # ------------------------------------------------------------------
+        # 3c. HARVEST — ascending slot order
+        # ------------------------------------------------------------------
+        harvesters = np.flatnonzero(living & (actions.primary == int(Action.HARVEST)))
+        harvested_total = harvest(store, state, harvesters, cfg)
 
         # ------------------------------------------------------------------
         # 4. EAT
@@ -218,9 +235,10 @@ class Simulation:
         # REST (Action.REST) is already a no-op — nothing to do.
 
         # ------------------------------------------------------------------
-        # 5. World dynamics: regrow wild food, spoil carried inventory
+        # 5. World dynamics: regrow wild food, advance crop growth/rot, spoil carried
         # ------------------------------------------------------------------
         regrow_wild(state, world, self.t, cfg)
+        crop_step(state, world, self.t, cfg)
         spoil_carried(store, cfg)
 
         # ------------------------------------------------------------------
@@ -285,9 +303,12 @@ class Simulation:
             reward=reward,
             done=done_mask,
             info={
-                "t":        self.t,
-                "n_agents": self.store.n_living_agents(),
-                "deaths":   n_deaths,
+                "t":         self.t,
+                "n_agents":  self.store.n_living_agents(),
+                "deaths":    n_deaths,
+                "foraged":   foraged_total,
+                "harvested": harvested_total,
+                "planted":   planted_total,
             },
         )
 
