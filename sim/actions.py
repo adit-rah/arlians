@@ -72,8 +72,13 @@ def build_mask(world, state, store, cfg: SimConfig) -> np.ndarray:
       - NOOP, MOVE, REST: always True for living agents.
       - FORAGE: True only if wild_remaining[tile] > 0.
       - EAT: True only if inv_food > 0.
-      - All other actions (DRINK, PLANT, HARVEST, BUILD, CRAFT, STORE, RETRIEVE,
-        ATTACK, REPRODUCE): False until their phase is implemented.
+
+    Phase 2 rules (added):
+      - DRINK: True only if water_proximity[tile] >= cfg.drink_min_water.
+        (uses static base_resources["water_proximity"] for consistency with step)
+
+    All other actions (PLANT, HARVEST, BUILD, CRAFT, STORE, RETRIEVE,
+    ATTACK, REPRODUCE): False until their phase is implemented.
     """
     M = cfg.max_agents
     mask = np.zeros((M, N_PRIMARY), dtype=bool)
@@ -98,5 +103,10 @@ def build_mask(world, state, store, cfg: SimConfig) -> np.ndarray:
     # EAT: only if carrying food
     has_food = store.inv_food[live_idx] > 0.0
     mask[live_idx[has_food], Action.EAT] = True
+
+    # DRINK (Phase 2): only where water_proximity >= drink_min_water
+    water_prox = world.base_resources["water_proximity"]
+    near_water = water_prox[ys, xs] >= cfg.drink_min_water
+    mask[live_idx[near_water], Action.DRINK] = True
 
     return mask

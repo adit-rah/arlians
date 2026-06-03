@@ -24,13 +24,15 @@ from .reproduce import traits_from_genome
 
 def decay_drives(store: EntityStore, cfg: SimConfig) -> None:
     """
-    Decay per-step energy (and future drives) for all LIVING, non-predator agents.
+    Decay per-step energy and hydration for all LIVING, non-predator agents.
 
-    Phase 1: only energy decays.
+    Phase 1: energy decays.
       energy -= cfg.energy_decay * metab   (clip >= 0)
 
-    Hydration and thermal are not wired until their phases; they stay at their
-    init values and are not touched here.
+    Phase 2: hydration also decays.
+      hydration -= cfg.hydration_decay * water_need   (clip >= 0)
+
+    Thermal is not wired until Phase 4; it stays at its init value.
     """
     living = store.alive & ~store.is_predator
     if not living.any():
@@ -42,30 +44,41 @@ def decay_drives(store: EntityStore, cfg: SimConfig) -> None:
         store.energy[living] - cfg.energy_decay * traits.metab[living],
         0.0, None,
     ).astype(np.float32)
+    # hydration -= hydration_decay * water_need; only for living agents (Phase 2)
+    store.hydration[living] = np.clip(
+        store.hydration[living] - cfg.hydration_decay * traits.water_need[living],
+        0.0, None,
+    ).astype(np.float32)
 
 
 def update_health(store: EntityStore, cfg: SimConfig) -> None:
     """
     Regenerate or damage health based on homeostatic drive status.
 
-    Phase 1 rules (energy is the only active drive):
-      - If energy >= cfg.drive_safe_band  -> health += cfg.health_regen  (clip <= 1)
+    Phase 2 rules (energy AND hydration are active drives; thermal not yet):
+      - If energy >= cfg.drive_safe_band AND hydration >= cfg.drive_safe_band
+                                          -> health += cfg.health_regen  (clip <= 1)
       - If energy == 0                    -> health -= cfg.starve_damage
+      - If hydration == 0                 -> health -= cfg.starve_damage
+        (each drive at 0 contributes independently; both at 0 → 2× damage)
     """
     living = store.alive & ~store.is_predator
     if not living.any():
         return
 
-    energy = store.energy[living]
-    health = store.health[living]
+    energy    = store.energy[living]
+    hydration = store.hydration[living]
+    health    = store.health[living]
 
-    # Agents whose energy is in the safe band get health regen
-    safe = energy >= cfg.drive_safe_band
+    # Both active drives must be in safe band to regen health
+    safe = (energy >= cfg.drive_safe_band) & (hydration >= cfg.drive_safe_band)
     health = np.where(safe, health + cfg.health_regen, health)
 
-    # Agents whose energy is at zero are starving — take damage
-    starving = energy <= 0.0
-    health = np.where(starving, health - cfg.starve_damage, health)
+    # Each drive at zero deals independent starve_damage
+    starving    = energy    <= 0.0
+    dehydrated  = hydration <= 0.0
+    damage = (starving.astype(np.float32) + dehydrated.astype(np.float32)) * cfg.starve_damage
+    health = health - damage
 
     store.health[living] = np.clip(health, 0.0, 1.0).astype(np.float32)
 
@@ -145,6 +158,48 @@ def eat(store: EntityStore, idx: np.ndarray, cfg: SimConfig) -> None:
 
     store.energy[idx]   = np.clip(energy + cfg.eat_restore * consumed, 0.0, 1.0).astype(np.float32)
     store.inv_food[idx] = np.maximum(inv_food - consumed, 0.0).astype(np.float32)
+
+
+# ---------------------------------------------------------------------------
+# Phase 2 drinking
+# ---------------------------------------------------------------------------
+
+def drink(
+    store: EntityStore,
+    water_proximity: np.ndarray,
+    idx: np.ndarray,
+    cfg: SimConfig,
+) -> None:
+    """
+    Execute DRINK for the agents indicated by `idx` (integer array of slot indices).
+
+    For each agent in `idx` whose tile has water_proximity >= cfg.drink_min_water,
+    hydration is restored:
+        hydration = min(1.0, hydration + cfg.drink_restore)
+
+    Agents on a dry tile (water_proximity < drink_min_water) are no-ops — the mask
+    should have already prevented this, but we guard here for safety.
+
+    `idx` must be pre-filtered to contain only living agents that chose DRINK.
+    `water_proximity` is a (H, W) float32 array (base_resources or get_obs channel 8).
+    """
+    if idx.size == 0:
+        return
+
+    ys = store.y[idx]
+    xs = store.x[idx]
+    tile_water = water_proximity[ys, xs]
+
+    # Only agents on sufficiently watered tiles benefit
+    can_drink = tile_water >= cfg.drink_min_water
+    drink_idx = idx[can_drink]
+
+    if drink_idx.size == 0:
+        return
+
+    store.hydration[drink_idx] = np.clip(
+        store.hydration[drink_idx] + cfg.drink_restore, 0.0, 1.0
+    ).astype(np.float32)
 
 
 # ---------------------------------------------------------------------------

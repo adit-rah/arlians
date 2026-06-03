@@ -64,13 +64,17 @@ def resolve_deaths(
 
     Steps:
       1. Find slots where alive=True and health <= 0.
-      2. Zero / reset all per-slot fields so the freed slot is clean for reuse.
-      3. Set alive=False (the key flag).
+      2. Attribute cause of death (BEFORE zeroing drives):
+           hydration <= 0 -> "dehydrate"
+           else energy <= 0 -> "starve"
+      3. Zero / reset all per-slot fields so the freed slot is clean for reuse.
+      4. Set alive=False (the key flag).
 
     Returns a boolean (M,) mask: True for slots that died THIS step.
     The mask is also used as the `done` signal for the step output.
 
-    If `metrics_deaths` is a dict it receives an increment: metrics_deaths["starve"] += n_died.
+    If `metrics_deaths` is a dict it receives increments to "starve" and/or
+    "dehydrate" matching each dead agent's attributed cause.
     """
     died_mask: np.ndarray = store.alive & (store.health <= 0.0)
 
@@ -78,6 +82,15 @@ def resolve_deaths(
         return died_mask
 
     idx = np.flatnonzero(died_mask)
+
+    # --- attribute cause of death BEFORE zeroing drives ---
+    if metrics_deaths is not None:
+        # Priority: hydration <= 0 -> dehydrate; else -> starve
+        dehydrate_mask = store.hydration[idx] <= 0.0
+        n_dehydrate    = int(dehydrate_mask.sum())
+        n_starve       = int(idx.size) - n_dehydrate
+        metrics_deaths["dehydrate"] = metrics_deaths.get("dehydrate", 0) + n_dehydrate
+        metrics_deaths["starve"]    = metrics_deaths.get("starve",    0) + max(n_starve, 0)
 
     # --- clear all per-slot fields to neutral/zero so the slot is ready for reuse ---
     store.alive[idx]        = False
@@ -98,8 +111,5 @@ def resolve_deaths(
     store.repro_cd[idx]     = 0
     store.genome[idx]       = 0.5   # reset to neutral genome
     store.last_signal[idx]  = 0
-
-    if metrics_deaths is not None:
-        metrics_deaths["starve"] = metrics_deaths.get("starve", 0) + int(idx.size)
 
     return died_mask

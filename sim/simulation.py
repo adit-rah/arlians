@@ -155,7 +155,7 @@ class Simulation:
         """
         from .actions import Action, DIRECTIONS
         from .dynamics import (
-            decay_drives, update_health, forage, eat, regrow_wild, spoil_carried,
+            decay_drives, update_health, forage, eat, drink, regrow_wild, spoil_carried,
         )
         from .reproduce import resolve_deaths
 
@@ -204,6 +204,16 @@ class Simulation:
         # ------------------------------------------------------------------
         eaters = np.flatnonzero(living & (actions.primary == int(Action.EAT)))
         eat(store, eaters, cfg)
+
+        # ------------------------------------------------------------------
+        # 4b. DRINK — restore hydration from water-proximity tiles
+        # ------------------------------------------------------------------
+        drinkers = np.flatnonzero(living & (actions.primary == int(Action.DRINK)))
+        if drinkers.size > 0:
+            # Use the static base water_proximity (seasonally-stable; consistent
+            # with what build_mask uses so mask and action gate never diverge).
+            water_prox = world.base_resources["water_proximity"]
+            drink(store, water_prox, drinkers, cfg)
 
         # REST (Action.REST) is already a no-op — nothing to do.
 
