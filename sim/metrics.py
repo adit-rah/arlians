@@ -57,6 +57,13 @@ class MetricsLogger:
         Mean ``state.wild_remaining`` value across all land tiles (elevation >=
         sea_level) recorded each step and averaged over the year.  Drops as
         patches are depleted; recovers during regrowth steps.
+
+    Phase 2 new keys in year_summary()
+    ------------------------------------
+    ``water_occupancy``
+        Fraction of living-agent-steps spent on tiles with
+        ``world.base_resources["water_proximity"] >= 0.6``.  Settlement near
+        water → high value; random/inland wandering → low value.  In [0, 1].
     """
 
     def __init__(self, out_path: Optional[str] = None) -> None:
@@ -117,6 +124,25 @@ class MetricsLogger:
             wild_mean = 0.0
         self._wild_food_samples.append(wild_mean)
 
+        # --- water occupancy ---
+        # Fraction of living-agent-steps spent on tiles with
+        # world.base_resources["water_proximity"] >= 0.6.
+        # Accumulate a (n_steps,) running numerator and denominator so we
+        # can average correctly over the year even if population varies.
+        living_mask = store.alive & ~store.is_predator
+        live_idx = np.flatnonzero(living_mask)
+        if live_idx.size > 0:
+            water_prox = world.base_resources["water_proximity"]
+            ys = store.y[live_idx]
+            xs = store.x[live_idx]
+            on_water = float((water_prox[ys, xs] >= 0.6).sum())
+            total = float(live_idx.size)
+        else:
+            on_water = 0.0
+            total = 0.0
+        self._water_on_steps += on_water
+        self._water_total_steps += total
+
     def year_summary(self) -> Dict[str, Any]:
         """Aggregate the accumulated steps into a per-year statistics dict.
 
@@ -135,6 +161,8 @@ class MetricsLogger:
           from their year-start position (settlement/nomadism signal).
         - ``wild_food_mean``  — mean wild_remaining on land tiles averaged over
           steps this year (patch-depletion signal).
+        - ``water_occupancy`` — fraction of living-agent-steps on tiles with
+          water_proximity >= 0.6 (water-anchoring signal, Phase 2). In [0, 1].
 
         The dict is intentionally open: later phases add keys
         (``pct_calories_farmed``, ``winter_survival_rate``,
@@ -164,6 +192,11 @@ class MetricsLogger:
         else:
             wild_food_mean = 0.0
 
+        if self._water_total_steps > 0:
+            water_occupancy = float(self._water_on_steps / self._water_total_steps)
+        else:
+            water_occupancy = 0.0
+
         summary: Dict[str, Any] = {
             "population_mean":  pop_mean,
             "population_min":   pop_min,
@@ -172,6 +205,7 @@ class MetricsLogger:
             "deaths_by_cause":  dict(self.deaths),
             "mean_displacement": mean_displacement,
             "wild_food_mean":    wild_food_mean,
+            "water_occupancy":   water_occupancy,
         }
 
         if self.out_path is not None:
@@ -197,3 +231,6 @@ class MetricsLogger:
         # Cleared on year rollover so displacement resets each year.
         self._spawn_y: Dict[int, int] = {}
         self._spawn_x: Dict[int, int] = {}
+        # Phase 2 accumulators
+        self._water_on_steps: float = 0.0    # agent-steps spent on water_proximity >= 0.6
+        self._water_total_steps: float = 0.0  # total living-agent-steps this year
