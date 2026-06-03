@@ -38,6 +38,10 @@ class SimConfig:
     starve_damage: float = 0.05     # /step per drive sitting at 0
     exposure_damage: float = 0.04   # /step cold & unsheltered (×curriculum D)
 
+    # ----- drinking (phase 2) -----
+    drink_min_water: float = 0.5    # min tile water_proximity required to DRINK
+    drink_restore: float = 1.0      # hydration restored per DRINK on a watered tile
+
     # ----- food economy -----
     eat_restore: float = 0.6        # energy restored per unit food eaten
     forage_yield: float = 0.4       # food gained foraging a full wild tile
