@@ -387,8 +387,10 @@ class Simulation:
             state=state,
             exposure_scale=D,
         )
+        deaths_by_cause: Dict[str, int] = {}
         done_mask = resolve_deaths(
             store,
+            metrics_deaths=deaths_by_cause,
             conflict_slots=conflict_slots_this_step,
             predator_slots=predator_slots_this_step,
         )
@@ -449,6 +451,7 @@ class Simulation:
                 "n_agents":           self.store.n_living_agents(),
                 "n_predators":        n_predators_now,
                 "deaths":             n_deaths,
+                "deaths_by_cause":    deaths_by_cause,
                 "births":             births_this_step,
                 "foraged":            foraged_total,
                 "harvested":          harvested_total,

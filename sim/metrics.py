@@ -403,6 +403,10 @@ class MetricsLogger:
         # --- Phase 5: births (from step info), genome drift, lineage diversity ---
         if info is not None:
             self.births += int(info.get("births", 0))
+            # accumulate per-cause deaths surfaced by step() so deaths_by_cause populates
+            for cause, n in info.get("deaths_by_cause", {}).items():
+                if cause in self.deaths:
+                    self.deaths[cause] += int(n)
         if live_idx.size > 0:
             self._genome_samples.append(store.genome[live_idx].mean(axis=0))
             self._lineage_count_samples.append(int(np.unique(store.lineage_id[live_idx]).size))
