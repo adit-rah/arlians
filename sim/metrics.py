@@ -226,6 +226,13 @@ class MetricsLogger:
             mean_th = 0.0
         self._thermal_samples.append(mean_th)
 
+        # --- Phase 5: births (from step info), genome drift, lineage diversity ---
+        if info is not None:
+            self.births += int(info.get("births", 0))
+        if live_idx.size > 0:
+            self._genome_samples.append(store.genome[live_idx].mean(axis=0))
+            self._lineage_count_samples.append(int(np.unique(store.lineage_id[live_idx]).size))
+
     def year_summary(self) -> Dict[str, Any]:
         """Aggregate the accumulated steps into a per-year statistics dict.
 
@@ -331,6 +338,22 @@ class MetricsLogger:
         else:
             mean_thermal = 0.0
 
+        # --- Phase 5 metrics ---
+        # mean_genome: per-gene mean over living agents, averaged across steps.
+        # genome_drift: mean |gene - 0.5| (how far the population has evolved from
+        # the neutral starting genome). lineage_count: mean distinct lineages alive.
+        if self._genome_samples:
+            mean_genome = np.mean(np.stack(self._genome_samples), axis=0)
+            mean_genome_list = [float(g) for g in mean_genome]
+            genome_drift = float(np.abs(mean_genome - 0.5).mean())
+        else:
+            mean_genome_list = []
+            genome_drift = 0.0
+        if self._lineage_count_samples:
+            lineage_count = float(np.mean(self._lineage_count_samples))
+        else:
+            lineage_count = 0.0
+
         summary: Dict[str, Any] = {
             "population_mean":  pop_mean,
             "population_min":   pop_min,
@@ -346,6 +369,10 @@ class MetricsLogger:
             "structures_built":    structures_built,
             "stored_food_total":   stored_food_total,
             "mean_thermal":        mean_thermal,
+            # Phase 5 keys
+            "mean_genome":         mean_genome_list,
+            "genome_drift":        genome_drift,
+            "lineage_count":       lineage_count,
         }
 
         if self.out_path is not None:
@@ -385,3 +412,6 @@ class MetricsLogger:
         self._struct_storage_samples: list[int] = []  # per-step storage count
         self._stored_food_samples: list[float] = []   # per-step sum(state.stored_food)
         self._thermal_samples: list[float] = []       # per-step mean thermal of living agents
+        # Phase 5 accumulators
+        self._genome_samples: list = []               # per-step mean genome (G,) over living agents
+        self._lineage_count_samples: list[int] = []   # per-step distinct lineage count
