@@ -245,7 +245,11 @@ class Simulation:
         # ------------------------------------------------------------------
         # 3b. PLANT — ascending slot order
         # ------------------------------------------------------------------
-        planters = np.flatnonzero(living & (actions.primary == int(Action.PLANT)))
+        planters = np.flatnonzero(
+            living
+            & (actions.primary == int(Action.PLANT))
+            & (store.energy >= cfg.plant_energy_threshold)
+        )
         plant_rng = np.random.default_rng(self.t + 3_000_000)
         planted_total = plant(store, state, planters, cfg, world, self.t, plant_rng)
 

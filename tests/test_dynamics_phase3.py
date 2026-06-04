@@ -425,13 +425,21 @@ def test_build_mask_plant_enabled_on_empty_land():
     ly, lx = int(land_ys[0]), int(land_xs[0])
     sim.store.y[agent] = ly
     sim.store.x[agent] = lx
-    sim.store.energy[agent] = cfg.plant_energy_cost
-    # Ensure tile is empty
+    sim.store.energy[agent] = cfg.plant_energy_threshold
+    # Ensure tile is empty and fertile enough to plant
     sim.state.crop_stage[ly, lx] = 0.0
+    soil = world.base_resources["soil_fertility"]
+    if float(soil[ly, lx]) < cfg.crop_min_fertility:
+        fertile = np.where(soil >= cfg.crop_min_fertility)
+        if fertile[0].size == 0:
+            pytest.skip("No fertile land tiles")
+        ly, lx = int(fertile[0][0]), int(fertile[1][0])
+        sim.store.y[agent] = ly
+        sim.store.x[agent] = lx
 
     mask = build_mask(world, sim.state, sim.store, cfg)
     assert mask[agent, int(Action.PLANT)], (
-        "PLANT should be enabled on empty land tile with enough energy"
+        "PLANT should be enabled on fertile empty land with enough energy"
     )
 
 
@@ -525,7 +533,7 @@ def test_build_mask_plant_disabled_for_dead_slots():
 
 
 def test_build_mask_plant_disabled_low_energy():
-    """PLANT is disabled when energy < plant_energy_cost."""
+    """PLANT is disabled when energy < plant_energy_threshold."""
     world = _make_world()
     cfg   = SimConfig(max_agents=16, init_agents=4)
     sim   = Simulation(world, cfg)
@@ -540,7 +548,15 @@ def test_build_mask_plant_disabled_low_energy():
     ly, lx = int(land_ys[0]), int(land_xs[0])
     sim.store.y[agent] = ly
     sim.store.x[agent] = lx
-    sim.store.energy[agent] = cfg.plant_energy_cost - 0.01
+    soil = world.base_resources["soil_fertility"]
+    if float(soil[ly, lx]) < cfg.crop_min_fertility:
+        fertile = np.where(soil >= cfg.crop_min_fertility)
+        if fertile[0].size == 0:
+            pytest.skip("No fertile land tiles")
+        ly, lx = int(fertile[0][0]), int(fertile[1][0])
+        sim.store.y[agent] = ly
+        sim.store.x[agent] = lx
+    sim.store.energy[agent] = cfg.plant_energy_threshold - 0.01
     sim.state.crop_stage[ly, lx] = 0.0
 
     mask = build_mask(world, sim.state, sim.store, cfg)

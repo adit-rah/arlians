@@ -109,12 +109,17 @@ def build_mask(world, state, store, cfg: SimConfig) -> np.ndarray:
     near_water = water_prox[ys, xs] >= cfg.drink_min_water
     mask[live_idx[near_water], Action.DRINK] = True
 
-    # PLANT (Phase 3): empty land, enough energy for attempt cost
+    # PLANT (Phase 3): fertile empty land, energy >= threshold (cost paid on attempt)
     sea_level  = world.cfg.sea_level
     on_land    = world.elevation[ys, xs] >= sea_level
     tile_empty = state.crop_stage[ys, xs] == 0.0
-    can_afford = store.energy[live_idx] >= cfg.plant_energy_cost
-    mask[live_idx[on_land & tile_empty & can_afford], Action.PLANT] = True
+    soil_fert  = world.base_resources["soil_fertility"][ys, xs]
+    fertile    = soil_fert >= cfg.crop_min_fertility
+    can_plant  = (
+        (store.energy[live_idx] >= cfg.plant_energy_threshold)
+        & on_land & tile_empty & fertile
+    )
+    mask[live_idx[can_plant], Action.PLANT] = True
 
     # HARVEST (Phase 3): only where crop_stage >= 1.0 (mature)
     tile_mature = state.crop_stage[ys, xs] >= 1.0
