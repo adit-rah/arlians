@@ -47,6 +47,7 @@ def collect(
     policy: ArlianPolicy,
     T: int,
     seed_offset: int = 0,
+    use_respawn: bool = True,
 ) -> SlotRolloutBuffer:
     """
     Roll out T environment steps, storing all (s, a, r, done, valid) in a buffer.
@@ -102,8 +103,10 @@ def collect(
             alive_mask   = obs.alive_mask,    # who was alive WHEN we acted
         )
 
-        # Respawn dead agents so population stays trainable (Phase 1-4, §3.2)
-        sim.respawn_dead(seed=seed_offset + t)
+        # Respawn dead agents so population stays trainable (Phase 1-4, §3.2).
+        # Disable at Phase 5+ to let REPRODUCE sustain the population instead.
+        if use_respawn:
+            sim.respawn_dead(seed=seed_offset + t)
 
         # Advance obs
         obs = step_out.obs
@@ -208,11 +211,37 @@ def update(
     }
 
 
+def save_checkpoint(path: str, policy, optimizer, update_i: int, history: list) -> None:
+    """Save policy + optimizer + progress so a disconnected run can resume."""
+    import os
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    torch.save({
+        "policy":    policy.state_dict(),
+        "optimizer": optimizer.state_dict(),
+        "update_i":  update_i,          # next update index to run
+        "history":   history,
+    }, path)
+
+
+def load_checkpoint(path: str, policy, optimizer) -> tuple:
+    """Restore from a checkpoint. Returns (start_update, history)."""
+    ckpt = torch.load(path, map_location=DEVICE)
+    policy.load_state_dict(ckpt["policy"])
+    optimizer.load_state_dict(ckpt["optimizer"])
+    return int(ckpt["update_i"]), list(ckpt.get("history", []))
+
+
 def train(
     sim: Simulation,
     policy: ArlianPolicy,
     n_updates: int,
     T: int,
+    *,
+    use_respawn: bool = True,
+    checkpoint_path: str | None = None,
+    checkpoint_every: int = 10,
+    resume: bool = False,
+    log_fn=None,
 ) -> List[Dict[str, Any]]:
     """
     Main PPO training loop (§3.2, §5).
@@ -222,21 +251,33 @@ def train(
       mean_reward, policy_loss, value_loss, entropy, n_living, total_loss
 
     Args:
-        sim:       initialised Simulation (already reset)
-        policy:    ArlianPolicy
-        n_updates: number of collect+update cycles
-        T:         rollout horizon (steps per update)
+        sim, policy, n_updates, T: as before.
+        use_respawn:     pass-through to collect() — keep True for Phases 1-4, set
+                         False at Phase 5+ to let reproduction sustain the population.
+        checkpoint_path: if set, save a resumable checkpoint here every
+                         checkpoint_every updates and at the end (survives Kaggle/Colab
+                         disconnects).
+        checkpoint_every:update interval between checkpoint saves.
+        resume:          if True and checkpoint_path exists, restore and continue.
+        log_fn:          optional callback(row: dict) invoked after each update (for
+                         live logging / TensorBoard); if None, nothing extra is logged.
     """
+    import os
     optimizer = optim.Adam(policy.parameters(), lr=LR)
 
-    # Ensure env starts fresh
-    _ = sim.reset(seed=0)
-
+    start_update = 0
     metrics_history: List[Dict[str, Any]] = []
 
-    for update_i in range(n_updates):
+    if resume and checkpoint_path and os.path.exists(checkpoint_path):
+        start_update, metrics_history = load_checkpoint(checkpoint_path, policy, optimizer)
+        print(f"[train] resumed from {checkpoint_path} at update {start_update}")
+    else:
+        # Ensure env starts fresh only on a brand-new run
+        _ = sim.reset(seed=0)
+
+    for update_i in range(start_update, n_updates):
         # ---- collect ----
-        buffer = collect(sim, policy, T, seed_offset=update_i * T)
+        buffer = collect(sim, policy, T, seed_offset=update_i * T, use_respawn=use_respawn)
 
         # Mean reward across valid (alive) timesteps
         valid_rewards = buffer.reward[buffer.valid_mask]
@@ -259,5 +300,14 @@ def train(
             **loss_dict,
         }
         metrics_history.append(row)
+        if log_fn is not None:
+            log_fn(row)
+
+        # ---- checkpoint ----
+        if checkpoint_path and ((update_i + 1) % checkpoint_every == 0):
+            save_checkpoint(checkpoint_path, policy, optimizer, update_i + 1, metrics_history)
+
+    if checkpoint_path:
+        save_checkpoint(checkpoint_path, policy, optimizer, n_updates, metrics_history)
 
     return metrics_history
