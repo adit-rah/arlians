@@ -48,13 +48,19 @@ def _single_agent_store(
     y: int = 0,
     x: int = 0,
     genome_val: float = 0.5,
+    thermal: float = 1.0,
 ) -> EntityStore:
-    """Minimal EntityStore with one living agent in slot 0."""
+    """Minimal EntityStore with one living agent in slot 0.
+
+    thermal defaults to 1.0 so these energy/hydration-focused tests are not
+    affected by the Phase-4 thermal drive (an unset thermal=0 would now starve).
+    """
     store = EntityStore.create(cfg)
     store.alive[0]     = True
     store.energy[0]    = energy
     store.hydration[0] = hydration
     store.health[0]    = health
+    store.thermal[0]   = thermal
     store.y[0]         = y
     store.x[0]         = x
     store.genome[0]    = genome_val

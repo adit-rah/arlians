@@ -152,13 +152,21 @@ class Simulation:
           6. World dynamics: regrow_wild, spoil_carried.
           7. Drive decay, health update, death resolution.
           8. Compute reward; build and return StepOut.
+
+        Phase 4 additions:
+          - BUILD/STORE/RETRIEVE actions processed in step 3/4 block.
+          - Thermal drive updated in step 7 (via decay_drives with temp args).
+          - structure_decay_step + spoil_stored called in world dynamics (step 6).
+          - Curriculum exposure_scale (D) applied to thermal/exposure.
         """
         from .actions import Action, DIRECTIONS
         from .dynamics import (
             decay_drives, update_health, forage, eat, drink, regrow_wild, spoil_carried,
             crop_step, plant, harvest,
+            build, store_food, retrieve_food, structure_decay_step, spoil_stored,
         )
         from .reproduce import resolve_deaths
+        from world.seasons import compute_season_state
 
         cfg   = self.cfg
         store = self.store
@@ -195,12 +203,13 @@ class Simulation:
 
         # ------------------------------------------------------------------
         # 3. FORAGE — ascending slot order for deterministic conflict resolution
+        #    Phase 4: also gathers wood/stone (abiotic, not depleted from tile)
         # ------------------------------------------------------------------
         # np.flatnonzero returns indices in ascending order by construction.
         foragers = np.flatnonzero(living & (actions.primary == int(Action.FORAGE)))
         # Snapshot wild_remaining sum before forage to compute foraged_total
         _wild_before = float(state.wild_remaining.sum()) if foragers.size > 0 else 0.0
-        forage(store, state, foragers, cfg)
+        forage(store, state, foragers, cfg, world=world)
         _wild_after = float(state.wild_remaining.sum()) if foragers.size > 0 else 0.0
         foraged_total = max(0.0, _wild_before - _wild_after)
 
@@ -215,6 +224,12 @@ class Simulation:
         # ------------------------------------------------------------------
         harvesters = np.flatnonzero(living & (actions.primary == int(Action.HARVEST)))
         harvested_total = harvest(store, state, harvesters, cfg)
+
+        # ------------------------------------------------------------------
+        # 3d. BUILD — Phase 4: ascending slot order (deterministic)
+        # ------------------------------------------------------------------
+        builders = np.flatnonzero(living & (actions.primary == int(Action.BUILD)))
+        built_total = build(store, state, builders, actions.param, cfg)
 
         # ------------------------------------------------------------------
         # 4. EAT
@@ -232,23 +247,55 @@ class Simulation:
             water_prox = world.base_resources["water_proximity"]
             drink(store, water_prox, drinkers, cfg)
 
+        # ------------------------------------------------------------------
+        # 4c. STORE / RETRIEVE — Phase 4 food storage actions
+        # ------------------------------------------------------------------
+        storers = np.flatnonzero(living & (actions.primary == int(Action.STORE)))
+        store_food(store, state, storers, cfg)
+
+        retrievers = np.flatnonzero(living & (actions.primary == int(Action.RETRIEVE)))
+        retrieve_food(store, state, retrievers, cfg)
+
         # REST (Action.REST) is already a no-op — nothing to do.
 
         # ------------------------------------------------------------------
-        # 5. World dynamics: regrow wild food, advance crop growth/rot, spoil carried
+        # 5. World dynamics: regrow wild food, advance crop growth/rot,
+        #    spoil carried food, structure decay, spoil stored food (Phase 4)
         # ------------------------------------------------------------------
         regrow_wild(state, world, self.t, cfg)
         crop_step(state, world, self.t, cfg)
         spoil_carried(store, cfg)
+        structure_decay_step(state, cfg)
+        spoil_stored(state, cfg)
 
         # ------------------------------------------------------------------
         # 6. Drive decay + health update + death resolution
+        #    Phase 4: pass thermal parameters so decay_drives/update_health
+        #             update thermal and apply exposure damage.
         # ------------------------------------------------------------------
         # Increment age for all living agents before dynamics
         store.age[living] += 1
 
-        decay_drives(store, cfg)
-        update_health(store, cfg)
+        # Seasonal temperature modifier for this step
+        season = compute_season_state(self.t, world.cfg)
+        temp_mod = float(season.temperature_modifier)
+        temp_base = world.temperature_base          # (H, W) f32
+        D = self.curriculum.exposure_scale          # difficulty scalar
+
+        decay_drives(
+            store, cfg,
+            temp_base=temp_base,
+            temperature_modifier=temp_mod,
+            state=state,
+            exposure_scale=D,
+        )
+        update_health(
+            store, cfg,
+            temp_base=temp_base,
+            temperature_modifier=temp_mod,
+            state=state,
+            exposure_scale=D,
+        )
         done_mask = resolve_deaths(store)
 
         # ------------------------------------------------------------------
@@ -309,6 +356,7 @@ class Simulation:
                 "foraged":   foraged_total,
                 "harvested": harvested_total,
                 "planted":   planted_total,
+                "built":     built_total,
             },
         )
 

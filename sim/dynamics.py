@@ -22,9 +22,17 @@ from .reproduce import traits_from_genome
 # Phase 1 drive dynamics
 # ---------------------------------------------------------------------------
 
-def decay_drives(store: EntityStore, cfg: SimConfig) -> None:
+def decay_drives(
+    store: EntityStore,
+    cfg: SimConfig,
+    *,
+    temp_base: np.ndarray | None = None,
+    temperature_modifier: float = 1.0,
+    state: "WorldState | None" = None,
+    exposure_scale: float = 1.0,
+) -> None:
     """
-    Decay per-step energy and hydration for all LIVING, non-predator agents.
+    Decay per-step energy, hydration, and thermal (Phase 4) for all LIVING agents.
 
     Phase 1: energy decays.
       energy -= cfg.energy_decay * metab   (clip >= 0)
@@ -32,7 +40,16 @@ def decay_drives(store: EntityStore, cfg: SimConfig) -> None:
     Phase 2: hydration also decays.
       hydration -= cfg.hydration_decay * water_need   (clip >= 0)
 
-    Thermal is not wired until Phase 4; it stays at its init value.
+    Phase 4: thermal updated via eff_temp:
+      eff_temp = temp_base[tile] * temperature_modifier + cold_tol
+                 + (shelter_temp_bonus if sheltered)
+      if eff_temp >= thermal_target_temp: thermal += thermal_warm_regen
+      else:                               thermal -= thermal_decay * exposure_scale
+      clip thermal to [0, 1].
+
+    `temp_base` is the world.temperature_base (H,W) array; if None thermal is skipped.
+    `state` is needed to check structure_type for shelter status (Phase 4).
+    `exposure_scale` is curriculum.exposure_scale (D).
     """
     living = store.alive & ~store.is_predator
     if not living.any():
@@ -50,17 +67,59 @@ def decay_drives(store: EntityStore, cfg: SimConfig) -> None:
         0.0, None,
     ).astype(np.float32)
 
+    # Phase 4: thermal update
+    if temp_base is not None:
+        live_idx = np.flatnonzero(living)
+        ys = store.y[live_idx]
+        xs = store.x[live_idx]
 
-def update_health(store: EntityStore, cfg: SimConfig) -> None:
+        # Tile temperature (base * seasonal modifier)
+        tile_temp = (temp_base[ys, xs] * temperature_modifier).astype(np.float32)
+
+        # Shelter bonus: structure_type==1 on the tile
+        if state is not None:
+            sheltered = (state.structure_type[ys, xs] == 1).astype(np.float32)
+        else:
+            sheltered = np.zeros(live_idx.size, dtype=np.float32)
+
+        shelter_bonus = sheltered * cfg.shelter_temp_bonus
+
+        # Effective temperature = tile_temp + cold_tol + shelter bonus
+        cold_tol = traits.cold_tol[live_idx]
+        eff_temp = tile_temp + cold_tol + shelter_bonus
+
+        warm = eff_temp >= cfg.thermal_target_temp
+        delta = np.where(
+            warm,
+            cfg.thermal_warm_regen,
+            -cfg.thermal_decay * exposure_scale,
+        ).astype(np.float32)
+
+        store.thermal[live_idx] = np.clip(
+            store.thermal[live_idx] + delta, 0.0, 1.0
+        ).astype(np.float32)
+
+
+def update_health(
+    store: EntityStore,
+    cfg: SimConfig,
+    *,
+    temp_base: np.ndarray | None = None,
+    temperature_modifier: float = 1.0,
+    state: "WorldState | None" = None,
+    exposure_scale: float = 1.0,
+) -> None:
     """
     Regenerate or damage health based on homeostatic drive status.
 
-    Phase 2 rules (energy AND hydration are active drives; thermal not yet):
-      - If energy >= cfg.drive_safe_band AND hydration >= cfg.drive_safe_band
-                                          -> health += cfg.health_regen  (clip <= 1)
-      - If energy == 0                    -> health -= cfg.starve_damage
-      - If hydration == 0                 -> health -= cfg.starve_damage
-        (each drive at 0 contributes independently; both at 0 → 2× damage)
+    Phase 4 rules (energy, hydration, AND thermal are active drives):
+      - If all three drives >= cfg.drive_safe_band -> health += cfg.health_regen
+      - Each drive at 0 -> health -= cfg.starve_damage  (independent, additive)
+      - Exposure damage (Phase 4): when eff_temp < thermal_target_temp:
+          health -= cfg.exposure_damage * exposure_scale
+                    * (shelter_exposure_mult if sheltered else 1.0)
+
+    `temp_base` is world.temperature_base (H,W); if None exposure damage is skipped.
     """
     living = store.alive & ~store.is_predator
     if not living.any():
@@ -68,17 +127,51 @@ def update_health(store: EntityStore, cfg: SimConfig) -> None:
 
     energy    = store.energy[living]
     hydration = store.hydration[living]
+    thermal   = store.thermal[living]
     health    = store.health[living]
 
-    # Both active drives must be in safe band to regen health
-    safe = (energy >= cfg.drive_safe_band) & (hydration >= cfg.drive_safe_band)
+    # All three active drives must be in safe band to regen health
+    safe = (
+        (energy >= cfg.drive_safe_band)
+        & (hydration >= cfg.drive_safe_band)
+        & (thermal >= cfg.drive_safe_band)
+    )
     health = np.where(safe, health + cfg.health_regen, health)
 
     # Each drive at zero deals independent starve_damage
     starving    = energy    <= 0.0
     dehydrated  = hydration <= 0.0
-    damage = (starving.astype(np.float32) + dehydrated.astype(np.float32)) * cfg.starve_damage
+    freezing    = thermal   <= 0.0
+    damage = (
+        starving.astype(np.float32)
+        + dehydrated.astype(np.float32)
+        + freezing.astype(np.float32)
+    ) * cfg.starve_damage
     health = health - damage
+
+    # Phase 4 exposure damage
+    if temp_base is not None:
+        live_idx = np.flatnonzero(living)
+        ys = store.y[live_idx]
+        xs = store.x[live_idx]
+
+        tile_temp = (temp_base[ys, xs] * temperature_modifier).astype(np.float32)
+
+        if state is not None:
+            sheltered = state.structure_type[ys, xs] == 1
+        else:
+            sheltered = np.zeros(live_idx.size, dtype=bool)
+
+        traits = traits_from_genome(store.genome)
+        cold_tol = traits.cold_tol[live_idx]
+        shelter_bonus = sheltered.astype(np.float32) * cfg.shelter_temp_bonus
+        eff_temp = tile_temp + cold_tol + shelter_bonus
+
+        cold_exposure = eff_temp < cfg.thermal_target_temp
+        mult = np.where(sheltered, cfg.shelter_exposure_mult, 1.0).astype(np.float32)
+        exp_damage = (cold_exposure.astype(np.float32)
+                      * cfg.exposure_damage * exposure_scale * mult)
+        health = health - exp_damage
 
     store.health[living] = np.clip(health, 0.0, 1.0).astype(np.float32)
 
@@ -92,17 +185,25 @@ def forage(
     state: WorldState,
     idx: np.ndarray,
     cfg: SimConfig,
+    world=None,
 ) -> None:
     """
     Execute FORAGE for the agents indicated by `idx` (integer array of slot indices).
 
-    Each foraging agent on their tile takes:
+    Phase 1 (food):
         take = min(capacity - inv_food, wild_remaining[tile], cfg.forage_yield)
-    and that amount is deducted from wild_remaining and added to inv_food.
+        deduct from wild_remaining, add to inv_food.
+
+    Phase 4 (materials — abiotic, NOT depleted from the tile):
+        inv_wood  += min(material_cap - inv_wood,  wood_layer[tile])
+        inv_stone += min(material_cap - inv_stone, stone_layer[tile])
 
     `idx` must be pre-filtered to contain only living agents that chose FORAGE.
     The order of idx is the conflict-resolution order (ascending slot index for
     determinism); agents processed later see the updated wild_remaining.
+
+    `world` (optional): if provided, also gathers wood/stone from
+        world.base_resources["wood"] / ["stone"].  If None, only food is gathered.
 
     Uses traits_from_genome to get per-agent carry capacity.
     """
@@ -112,26 +213,54 @@ def forage(
     traits = traits_from_genome(store.genome)
     # Per-agent carry capacity = base * genome capacity trait
     cap_per_agent = (cfg.carry_capacity * traits.capacity[idx]).astype(np.float32)
+    # Per-agent material capacity = base * genome capacity trait
+    mat_cap_per_agent = (cfg.material_capacity * traits.capacity[idx]).astype(np.float32)
 
     ys = store.y[idx]
     xs = store.x[idx]
+
+    # Material layers (None if world not provided)
+    wood_layer  = world.base_resources["wood"]  if world is not None else None
+    stone_layer = world.base_resources["stone"] if world is not None else None
 
     # Process tile by tile for correct conflict resolution.
     # Group foragers by tile so we apply depletion atomically per tile;
     # within a tile, process in the order they appear in idx (ascending slot).
     # We iterate unique tiles but keep the order from idx for within-tile ordering.
-    for slot_pos, (slot, y, x, cap) in enumerate(zip(idx, ys, xs, cap_per_agent)):
+    for slot_pos, (slot, y, x, cap, mat_cap) in enumerate(
+        zip(idx, ys, xs, cap_per_agent, mat_cap_per_agent)
+    ):
+        # --- food (biotic, depletes tile) ---
         available = state.wild_remaining[y, x]
-        if available <= 0.0:
-            continue
-        room = cap - store.inv_food[slot]
-        if room <= 0.0:
-            continue
-        take = float(min(room, available, cfg.forage_yield))
-        if take <= 0.0:
-            continue
-        state.wild_remaining[y, x] = max(0.0, available - take)
-        store.inv_food[slot] = min(cap, store.inv_food[slot] + take)
+        if available > 0.0:
+            room = cap - store.inv_food[slot]
+            if room > 0.0:
+                take = float(min(room, available, cfg.forage_yield))
+                if take > 0.0:
+                    state.wild_remaining[y, x] = max(0.0, available - take)
+                    store.inv_food[slot] = min(cap, store.inv_food[slot] + take)
+
+        # --- wood (abiotic, NOT depleted) ---
+        if wood_layer is not None:
+            wood_avail = float(wood_layer[y, x])
+            if wood_avail > 0.0:
+                room_w = float(mat_cap) - float(store.inv_wood[slot])
+                if room_w > 0.0:
+                    gain_w = min(room_w, wood_avail)
+                    store.inv_wood[slot] = np.float32(
+                        min(float(mat_cap), float(store.inv_wood[slot]) + gain_w)
+                    )
+
+        # --- stone (abiotic, NOT depleted) ---
+        if stone_layer is not None:
+            stone_avail = float(stone_layer[y, x])
+            if stone_avail > 0.0:
+                room_s = float(mat_cap) - float(store.inv_stone[slot])
+                if room_s > 0.0:
+                    gain_s = min(room_s, stone_avail)
+                    store.inv_stone[slot] = np.float32(
+                        min(float(mat_cap), float(store.inv_stone[slot]) + gain_s)
+                    )
 
 
 def eat(store: EntityStore, idx: np.ndarray, cfg: SimConfig) -> None:
@@ -355,3 +484,186 @@ def harvest(
             state.crop_health[y, x] = np.float32(0.0)
             state.crop_owner[y, x]  = np.int32(-1)
     return float(total_harvested)
+
+
+# ---------------------------------------------------------------------------
+# Phase 4 structures: build, store/retrieve, decay, spoil stored
+# ---------------------------------------------------------------------------
+
+def build(
+    store: EntityStore,
+    state: WorldState,
+    idx: np.ndarray,
+    param: np.ndarray,
+    cfg: SimConfig,
+) -> int:
+    """
+    Execute BUILD for agents in `idx` (chose BUILD action).
+
+    For each agent (ascending slot order for determinism):
+      - Tile must have structure_type == 0 (no existing structure).
+      - `param[slot]` selects the structure type (1=SHELTER, 2=STORAGE; 3=WALL skipped).
+      - Agent must carry enough material (wood/stone) per the cost dict.
+      - On success: deduct cost, set structure_type and structure_hp=structure_init_hp.
+
+    Returns count of structures built this step.
+    """
+    if idx.size == 0:
+        return 0
+
+    cost_map = {
+        1: cfg.shelter_cost,   # SHELTER
+        2: cfg.storage_cost,   # STORAGE
+        # 3: cfg.wall_cost     # WALL — skip in Phase 4
+    }
+
+    built = 0
+    for slot in idx:
+        y = int(store.y[slot])
+        x = int(store.x[slot])
+        if state.structure_type[y, x] != 0:
+            continue  # tile already occupied
+
+        stype = int(param[slot])
+        if stype not in cost_map:
+            continue  # unsupported type (e.g. WALL) or invalid param
+
+        cost = cost_map[stype]
+        wood_cost  = float(cost.get("wood",  0.0))
+        stone_cost = float(cost.get("stone", 0.0))
+
+        if float(store.inv_wood[slot]) < wood_cost:
+            continue
+        if float(store.inv_stone[slot]) < stone_cost:
+            continue
+
+        # Deduct cost and place structure
+        store.inv_wood[slot]  = np.float32(float(store.inv_wood[slot])  - wood_cost)
+        store.inv_stone[slot] = np.float32(float(store.inv_stone[slot]) - stone_cost)
+        state.structure_type[y, x] = np.int8(stype)
+        state.structure_hp[y, x]   = np.float32(cfg.structure_init_hp)
+        built += 1
+
+    return built
+
+
+def store_food(
+    store: EntityStore,
+    state: WorldState,
+    idx: np.ndarray,
+    cfg: SimConfig,
+) -> float:
+    """
+    Execute STORE for agents in `idx` (chose STORE action).
+
+    Moves inv_food -> stored_food on the agent's tile, which must be a STORAGE
+    structure (structure_type==2).  Transfer is capped by storage_capacity.
+
+    Returns total food deposited this step.
+    """
+    if idx.size == 0:
+        return 0.0
+
+    total = 0.0
+    for slot in idx:
+        y = int(store.y[slot])
+        x = int(store.x[slot])
+        if int(state.structure_type[y, x]) != 2:
+            continue  # not a storage tile
+        already = float(state.stored_food[y, x])
+        room = cfg.storage_capacity - already
+        if room <= 0.0:
+            continue
+        move = min(float(store.inv_food[slot]), room)
+        if move <= 0.0:
+            continue
+        state.stored_food[y, x] = np.float32(already + move)
+        store.inv_food[slot]    = np.float32(float(store.inv_food[slot]) - move)
+        total += move
+
+    return float(total)
+
+
+def retrieve_food(
+    store: EntityStore,
+    state: WorldState,
+    idx: np.ndarray,
+    cfg: SimConfig,
+) -> float:
+    """
+    Execute RETRIEVE for agents in `idx` (chose RETRIEVE action).
+
+    Moves stored_food -> inv_food on the agent's tile (must be STORAGE structure).
+    Transfer is capped by agent's carry capacity (genome-scaled).
+
+    Returns total food retrieved this step.
+    """
+    if idx.size == 0:
+        return 0.0
+
+    traits = traits_from_genome(store.genome)
+    total = 0.0
+
+    for slot in idx:
+        y = int(store.y[slot])
+        x = int(store.x[slot])
+        if int(state.structure_type[y, x]) != 2:
+            continue  # not a storage tile
+        available = float(state.stored_food[y, x])
+        if available <= 0.0:
+            continue
+        cap = float(cfg.carry_capacity * traits.capacity[slot])
+        room = cap - float(store.inv_food[slot])
+        if room <= 0.0:
+            continue
+        move = min(available, room)
+        if move <= 0.0:
+            continue
+        store.inv_food[slot]    = np.float32(float(store.inv_food[slot]) + move)
+        state.stored_food[y, x] = np.float32(available - move)
+        total += move
+
+    return float(total)
+
+
+def structure_decay_step(state: WorldState, cfg: SimConfig) -> int:
+    """
+    Decay all structure HP each step; clear structures that reach hp <= 0.
+
+    structure_hp -= cfg.structure_decay   (for all tiles with structure_type != 0)
+    Tiles with hp <= 0 after decay: structure_type=0, structure_hp=0, stored_food=0.
+
+    Returns count of structures that collapsed this step.
+    """
+    has_structure = state.structure_type != 0
+    if not has_structure.any():
+        return 0
+
+    state.structure_hp[has_structure] = (
+        state.structure_hp[has_structure] - cfg.structure_decay
+    ).astype(np.float32)
+
+    collapsed = has_structure & (state.structure_hp <= 0.0)
+    n_collapsed = int(collapsed.sum())
+    if n_collapsed > 0:
+        state.structure_type[collapsed] = np.int8(0)
+        state.structure_hp[collapsed]   = np.float32(0.0)
+        state.stored_food[collapsed]    = np.float32(0.0)
+
+    return n_collapsed
+
+
+def spoil_stored(state: WorldState, cfg: SimConfig) -> None:
+    """
+    Spoil food sitting in storage structures each step.
+
+        stored_food -= cfg.spoilage_stored   (clip >= 0)
+
+    Only tiles with stored_food > 0 are affected.
+    """
+    has_food = state.stored_food > 0.0
+    if not has_food.any():
+        return
+    state.stored_food[has_food] = np.maximum(
+        state.stored_food[has_food] - cfg.spoilage_stored, 0.0
+    ).astype(np.float32)

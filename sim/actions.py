@@ -119,4 +119,37 @@ def build_mask(world, state, store, cfg: SimConfig) -> np.ndarray:
     tile_mature = state.crop_stage[ys, xs] >= 1.0
     mask[live_idx[tile_mature], Action.HARVEST] = True
 
+    # BUILD (Phase 4): on land tiles with no existing structure (structure_type==0),
+    # where the agent can afford at least shelter or storage.
+    from .reproduce import traits_from_genome
+    traits = traits_from_genome(store.genome)
+
+    no_structure   = state.structure_type[ys, xs] == 0
+    buildable_land = on_land & no_structure
+
+    shelter_wood  = cfg.shelter_cost.get("wood",  0.0)
+    shelter_stone = cfg.shelter_cost.get("stone", 0.0)
+    storage_wood  = cfg.storage_cost.get("wood",  0.0)
+    storage_stone = cfg.storage_cost.get("stone", 0.0)
+
+    can_afford_shelter = (
+        (store.inv_wood[live_idx]  >= shelter_wood)
+        & (store.inv_stone[live_idx] >= shelter_stone)
+    )
+    can_afford_storage = (
+        (store.inv_wood[live_idx]  >= storage_wood)
+        & (store.inv_stone[live_idx] >= storage_stone)
+    )
+    can_afford_any = can_afford_shelter | can_afford_storage
+    mask[live_idx[buildable_land & can_afford_any], Action.BUILD] = True
+
+    # STORE (Phase 4): on a storage tile (structure_type==2) while carrying food
+    on_storage   = state.structure_type[ys, xs] == 2
+    has_food_inv = store.inv_food[live_idx] > 0.0
+    mask[live_idx[on_storage & has_food_inv], Action.STORE] = True
+
+    # RETRIEVE (Phase 4): on a storage tile with stored_food > 0
+    has_stored = state.stored_food[ys, xs] > 0.0
+    mask[live_idx[on_storage & has_stored], Action.RETRIEVE] = True
+
     return mask

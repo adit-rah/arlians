@@ -66,15 +66,17 @@ def resolve_deaths(
       1. Find slots where alive=True and health <= 0.
       2. Attribute cause of death (BEFORE zeroing drives):
            hydration <= 0 -> "dehydrate"
-           else energy <= 0 -> "starve"
+           energy <= 0 (and hydration > 0) -> "starve"
+           thermal <= 0 (and energy > 0 and hydration > 0) -> "exposure"
+           else -> "starve"  (health drained by other means)
       3. Zero / reset all per-slot fields so the freed slot is clean for reuse.
       4. Set alive=False (the key flag).
 
     Returns a boolean (M,) mask: True for slots that died THIS step.
     The mask is also used as the `done` signal for the step output.
 
-    If `metrics_deaths` is a dict it receives increments to "starve" and/or
-    "dehydrate" matching each dead agent's attributed cause.
+    If `metrics_deaths` is a dict it receives increments to "starve", "dehydrate",
+    and/or "exposure" matching each dead agent's attributed cause.
     """
     died_mask: np.ndarray = store.alive & (store.health <= 0.0)
 
@@ -85,12 +87,22 @@ def resolve_deaths(
 
     # --- attribute cause of death BEFORE zeroing drives ---
     if metrics_deaths is not None:
-        # Priority: hydration <= 0 -> dehydrate; else -> starve
+        # Priority: hydration <= 0 -> dehydrate
+        #           else energy <= 0 -> starve
+        #           else thermal <= 0 -> exposure
+        #           else -> starve (generic health drain)
         dehydrate_mask = store.hydration[idx] <= 0.0
-        n_dehydrate    = int(dehydrate_mask.sum())
-        n_starve       = int(idx.size) - n_dehydrate
+        starve_mask    = (~dehydrate_mask) & (store.energy[idx] <= 0.0)
+        exposure_mask  = (~dehydrate_mask) & (~starve_mask) & (store.thermal[idx] <= 0.0)
+        other_mask     = (~dehydrate_mask) & (~starve_mask) & (~exposure_mask)
+
+        n_dehydrate = int(dehydrate_mask.sum())
+        n_starve    = int(starve_mask.sum()) + int(other_mask.sum())
+        n_exposure  = int(exposure_mask.sum())
+
         metrics_deaths["dehydrate"] = metrics_deaths.get("dehydrate", 0) + n_dehydrate
-        metrics_deaths["starve"]    = metrics_deaths.get("starve",    0) + max(n_starve, 0)
+        metrics_deaths["starve"]    = metrics_deaths.get("starve",    0) + n_starve
+        metrics_deaths["exposure"]  = metrics_deaths.get("exposure",  0) + n_exposure
 
     # --- clear all per-slot fields to neutral/zero so the slot is ready for reuse ---
     store.alive[idx]        = False
