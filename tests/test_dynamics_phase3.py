@@ -28,7 +28,7 @@ from sim.config import SimConfig
 from sim.state import WorldState, EntityStore
 from sim.simulation import Simulation, Actions
 from sim.actions import Action, N_PRIMARY, build_mask
-from sim.dynamics import crop_step, plant, harvest
+from sim.dynamics import crop_step, plant, harvest, _plant_success_prob
 
 
 # ---------------------------------------------------------------------------
@@ -97,6 +97,23 @@ def _mock_world(
         },
         elevation=np.full((H, W), elevation, dtype=np.float32),
     )
+
+
+def _run_plant(
+    store,
+    state,
+    idx,
+    cfg,
+    *,
+    soil: float = 0.9,
+    water: float = 1.0,
+    t: int = 180,
+    seed: int = 0,
+) -> int:
+    """Call plant() on a mock world with high fertility by default."""
+    world = _mock_world(soil=soil, water=water)
+    rng = np.random.default_rng(seed)
+    return plant(store, state, idx, cfg, world, t, rng)
 
 
 # ---------------------------------------------------------------------------
@@ -320,10 +337,12 @@ def test_plant_noop_on_occupied_tile():
     state.crop_health[5, 5] = np.float32(0.80)
     state.crop_owner[5, 5]  = np.int32(99)   # some other owner
 
+    energy_before = float(store.energy[0])
     idx = np.array([0], dtype=np.int32)
-    n_planted = plant(store, state, idx, cfg)
+    n_planted = _run_plant(store, state, idx, cfg)
 
     assert n_planted == 0, "plant() should return 0 when tile is occupied"
+    assert float(store.energy[0]) == pytest.approx(energy_before), "no cost on occupied tile"
     assert float(state.crop_stage[5, 5])  == pytest.approx(0.50), "crop_stage changed"
     assert float(state.crop_health[5, 5]) == pytest.approx(0.80), "crop_health changed"
     assert int(state.crop_owner[5, 5])    == 99, "crop_owner changed"
@@ -338,13 +357,14 @@ def test_plant_two_agents_same_tile_first_wins():
     # Two agents at the same tile
     for slot in [0, 1]:
         store.alive[slot]      = True
+        store.energy[slot]     = 1.0
         store.y[slot]          = 8
         store.x[slot]          = 8
         store.genome[slot]     = 0.5
         store.lineage_id[slot] = slot + 10
 
     idx = np.array([0, 1], dtype=np.int32)
-    n_planted = plant(store, state, idx, cfg)
+    n_planted = _run_plant(store, state, idx, cfg, soil=1.0, seed=1)
 
     assert n_planted == 1, "Only one crop should be planted on a shared tile"
     assert float(state.crop_stage[8, 8]) == pytest.approx(0.01)
@@ -405,12 +425,13 @@ def test_build_mask_plant_enabled_on_empty_land():
     ly, lx = int(land_ys[0]), int(land_xs[0])
     sim.store.y[agent] = ly
     sim.store.x[agent] = lx
+    sim.store.energy[agent] = cfg.plant_energy_cost
     # Ensure tile is empty
     sim.state.crop_stage[ly, lx] = 0.0
 
     mask = build_mask(world, sim.state, sim.store, cfg)
     assert mask[agent, int(Action.PLANT)], (
-        "PLANT should be enabled on empty land tile"
+        "PLANT should be enabled on empty land tile with enough energy"
     )
 
 
@@ -503,6 +524,67 @@ def test_build_mask_plant_disabled_for_dead_slots():
     assert not mask[:, int(Action.PLANT)].any(), "Dead slots must have PLANT=False"
 
 
+def test_build_mask_plant_disabled_low_energy():
+    """PLANT is disabled when energy < plant_energy_cost."""
+    world = _make_world()
+    cfg   = SimConfig(max_agents=16, init_agents=4)
+    sim   = Simulation(world, cfg)
+    sim.reset(seed=0)
+
+    sea_level = world.cfg.sea_level
+    land_ys, land_xs = np.where(world.elevation >= sea_level)
+    if land_ys.size == 0:
+        pytest.skip("No land tiles")
+
+    agent = int(np.flatnonzero(sim.store.living_agents_mask())[0])
+    ly, lx = int(land_ys[0]), int(land_xs[0])
+    sim.store.y[agent] = ly
+    sim.store.x[agent] = lx
+    sim.store.energy[agent] = cfg.plant_energy_cost - 0.01
+    sim.state.crop_stage[ly, lx] = 0.0
+
+    mask = build_mask(world, sim.state, sim.store, cfg)
+    assert not mask[agent, int(Action.PLANT)]
+
+
+def test_plant_success_prob_steep():
+    """Marginal fertility gives low success chance (cubic ramp, not linear)."""
+    cfg = _make_cfg()
+    assert _plant_success_prob(0.10, cfg) == 0.0
+    assert _plant_success_prob(0.30, cfg) < 0.05
+    assert _plant_success_prob(0.45, cfg) < 0.35
+    assert _plant_success_prob(0.60, cfg) == 1.0
+
+
+def test_plant_cost_on_fail_low_fertility():
+    """Failed plant on barren soil still costs energy and leaves tile empty."""
+    cfg = _make_cfg()
+    store = _single_agent_store(cfg, energy=1.0, y=4, x=4)
+    state = _make_state()
+    idx = np.array([0], dtype=np.int32)
+
+    n = _run_plant(store, state, idx, cfg, soil=0.05, t=0, seed=99)
+
+    assert n == 0
+    assert float(state.crop_stage[4, 4]) == 0.0
+    assert float(store.energy[0]) == pytest.approx(1.0 - cfg.plant_energy_cost)
+
+
+def test_plant_succeeds_high_fertility():
+    """Plant succeeds on fertile soil (p=1) and sets crop fields."""
+    cfg = _make_cfg()
+    store = _single_agent_store(cfg, energy=1.0, y=3, x=3, lineage_id=11)
+    state = _make_state()
+    idx = np.array([0], dtype=np.int32)
+
+    n = _run_plant(store, state, idx, cfg, soil=0.9, t=180, seed=1)
+
+    assert n == 1
+    assert float(state.crop_stage[3, 3]) == pytest.approx(0.01)
+    assert int(state.crop_owner[3, 3]) == 11
+    assert float(store.energy[0]) == pytest.approx(1.0 - cfg.plant_energy_cost)
+
+
 # ---------------------------------------------------------------------------
 # 6. step() info exposes foraged / harvested / planted totals
 # ---------------------------------------------------------------------------
@@ -544,17 +626,21 @@ def test_step_info_planted_increments():
     sea_level = world.cfg.sea_level
     land_ys, land_xs = np.where(world.elevation >= sea_level)
 
-    # Scatter agents to different land tiles to avoid tile collisions
+    # Place agents on the best fertility land tiles (steep p makes random scatter flaky)
+    soil = world.base_resources["soil_fertility"]
+    on_land = world.elevation >= sea_level
+    ranked = np.argsort(np.where(on_land, soil, -1.0).ravel())[::-1]
     for i, slot in enumerate(live_idx):
-        i2 = i % len(land_ys)
-        sim.store.y[slot] = int(land_ys[i2 + (i * 7) % max(1, len(land_ys) - i)])
-        sim.store.x[slot] = int(land_xs[i2 + (i * 7) % max(1, len(land_ys) - i)])
+        flat = int(ranked[i % ranked.size])
+        sim.store.y[slot] = flat // soil.shape[1]
+        sim.store.x[slot] = flat % soil.shape[1]
 
     M = cfg.max_agents
     primary = np.full(M, int(Action.NOOP), dtype=np.int32)
     param   = np.zeros(M, dtype=np.int32)
     emit    = np.zeros(M, dtype=np.int32)
     primary[live_idx] = int(Action.PLANT)
+    sim.t = 180  # growing season — higher plant success probability
 
     out = sim.step(Actions(primary=primary, param=param, emit=emit))
     assert out.info["planted"] > 0, (
@@ -628,10 +714,11 @@ def test_full_farming_cycle_agent_gains_energy():
     slot = 0
     sim.store.y[slot] = py
     sim.store.x[slot] = px
-    sim.store.energy[slot]    = 0.3   # start hungry
+    sim.store.energy[slot]    = 1.0   # afford plant cost; still hungry after eat test
     sim.store.hydration[slot] = 1.0
     sim.store.inv_food[slot]  = 0.0
     sim.store.lineage_id[slot] = 0
+    sim.t = 180  # growing season for reliable plant success on prime tile
 
     # ---- Step 1: PLANT ----
     M = cfg.max_agents
@@ -673,6 +760,7 @@ def test_full_farming_cycle_agent_gains_energy():
     assert sim.state.crop_stage[py, px] == pytest.approx(0.0)
 
     # ---- Step 4: EAT ----
+    sim.store.energy[slot] = 0.3  # hungry before eating harvested food
     pre_eat_energy = float(sim.store.energy[slot])
     primary[slot] = int(Action.EAT)
     out = sim.step(Actions(primary=primary, param=param, emit=emit))
@@ -695,7 +783,7 @@ def test_plant_sets_lineage_id():
     state = _make_state()
 
     idx = np.array([0], dtype=np.int32)
-    plant(store, state, idx, cfg)
+    _run_plant(store, state, idx, cfg, soil=1.0, seed=2)
 
     assert state.crop_stage[6, 6]  == pytest.approx(0.01)
     assert state.crop_health[6, 6] == pytest.approx(1.0)

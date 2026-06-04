@@ -41,6 +41,24 @@ def _river_fertility_bonus(river_distance: np.ndarray) -> np.ndarray:
     return bonus.astype(np.float32)
 
 
+# Harsh biomes: river water does not create cropland (scale 0–1 on bonus only).
+_RIVER_FERT_BIOME_SCALE = {
+    Biome.DESERT: 0.0,
+    Biome.TUNDRA: 0.15,
+    Biome.MOUNTAIN: 0.0,
+    Biome.SNOW_PEAK: 0.0,
+    Biome.BEACH: 0.2,
+}
+
+
+def _river_fertility_scale_map(biome_map: np.ndarray) -> np.ndarray:
+    H, W = biome_map.shape
+    scale = np.ones((H, W), dtype=np.float32)
+    for biome, s in _RIVER_FERT_BIOME_SCALE.items():
+        scale[biome_map == biome] = s
+    return scale
+
+
 def _sparsify_wild_food(wild_food: np.ndarray, rng: np.random.Generator) -> np.ndarray:
     """
     Multiply wild food by a sparse mask so most tiles have near-zero
@@ -74,9 +92,10 @@ def make_resource_layers(
         raw = base * 0.7 + noise * 0.3
         result[key] = np.clip(raw, 0, 1).astype(np.float32)
 
-    # River fertility bonus applied on top
+    # River fertility bonus (suppressed on desert/tundra/mountain — water, not farmland)
     bonus = _river_fertility_bonus(river_distance)
-    fertility = result["soil_fertility"] + bonus * 0.6
+    fert_scale = _river_fertility_scale_map(biome_map)
+    fertility = result["soil_fertility"] + bonus * 0.6 * fert_scale
     result["soil_fertility"] = np.clip(fertility, 0, 1).astype(np.float32)
 
     # Water proximity driven by river distance (closer = higher)

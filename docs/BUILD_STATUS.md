@@ -60,7 +60,7 @@ and per-phase `test_phaseN_gate.py` files.
 .venv/bin/python -m pytest tests/ -q
 
 # 3. see an UNTRAINED policy in action (random weights) -> animated gif + metrics
-.venv/bin/python scripts/demo_untrained.py
+.venv/bin/python scripts/demo.py
 
 # 4. reduced-scale training smoke (CPU/MPS) -> PPO runs, loss moves
 .venv/bin/python train/run.py
@@ -93,4 +93,4 @@ running the shared-weights PPO at scale:
 ## Reference artifacts (in `data/`, git-ignored)
 
 `phase0_frame.png` … `phase7_final.png`, `final_world.png` (4096-agent world),
-`demo_untrained.gif` (untrained-policy rollout). Regenerate via the scripts above.
+`data/demo.gif` (default rollout; omit `--checkpoint` for untrained baseline). Regenerate via `scripts/demo.py`.

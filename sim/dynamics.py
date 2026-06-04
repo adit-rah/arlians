@@ -423,33 +423,63 @@ def crop_step(state: WorldState, world, t: int, cfg: SimConfig) -> None:
     state.crop_owner[clear]  = -1
 
 
+# eff_fert at which plant success probability reaches 1 (matches metrics fertile signal)
+_PLANT_FERTILE_CAP = 0.6
+
+
+def _plant_success_prob(eff_fert: float, cfg: SimConfig) -> float:
+    """Steep ramp: 0 below crop_min_fertility, ~1 at _PLANT_FERTILE_CAP (cubic in between)."""
+    if eff_fert < cfg.crop_min_fertility:
+        return 0.0
+    if eff_fert >= _PLANT_FERTILE_CAP:
+        return 1.0
+    t = (eff_fert - cfg.crop_min_fertility) / (
+        _PLANT_FERTILE_CAP - cfg.crop_min_fertility
+    )
+    return float(t * t * t)
+
+
 def plant(
     store: EntityStore,
     state: WorldState,
     idx: np.ndarray,
     cfg: SimConfig,
+    world,
+    t: int,
+    rng: np.random.Generator,
 ) -> int:
     """
     Execute PLANT for agents in `idx` (chose PLANT action).
 
     For each agent (ascending slot order for determinism):
-      - If the agent's tile has crop_stage == 0 (empty): plant a seed.
-        crop_stage = 0.01 (tiny init so it is "growing")
-        crop_health = 1.0
-        crop_owner  = agent's lineage_id
-      - If the tile is already occupied by a crop: no-op.
+      - If the tile already has a crop: no-op (no cost).
+      - On empty land: pay plant_energy_cost, then succeed with probability
+        p(eff_fert) where eff_fert = soil_fertility * season.fertility_modifier.
+      - On success: crop_stage = 0.01, crop_health = 1.0, crop_owner = lineage_id.
 
-    Returns total count of tiles planted this step.
+    Returns total count of successful plants this step.
     """
+    from world.seasons import compute_season_state
+
     if idx.size == 0:
         return 0
 
-    # idx from np.flatnonzero is already ascending; process in that order.
+    season = compute_season_state(t, world.cfg)
+    soil_fertility = world.base_resources["soil_fertility"]
+    cost = float(cfg.plant_energy_cost)
+
     planted = 0
     for slot in idx:
         y = int(store.y[slot])
         x = int(store.x[slot])
-        if state.crop_stage[y, x] == 0.0:
+        if state.crop_stage[y, x] != 0.0:
+            continue
+
+        eff_fert = float(soil_fertility[y, x] * season.fertility_modifier)
+        store.energy[slot] = np.float32(
+            max(0.0, float(store.energy[slot]) - cost)
+        )
+        if rng.random() < _plant_success_prob(eff_fert, cfg):
             state.crop_stage[y, x]  = np.float32(0.01)
             state.crop_health[y, x] = np.float32(1.0)
             state.crop_owner[y, x]  = int(store.lineage_id[slot])

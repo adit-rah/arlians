@@ -56,6 +56,7 @@ class SimConfig:
     crop_yield: float = 1.2             # food at full maturity (must beat forage_yield)
     crop_min_fertility: float = 0.15    # eff_fert below this -> crop rots
     crop_rot: float = 0.05              # crop_health lost/step under rot conditions
+    plant_energy_cost: float = 0.1      # energy spent per PLANT attempt (empty land)
 
     # ----- structures -----
     shelter_cost: Dict[str, float] = field(default_factory=lambda: _cost(wood=3))
