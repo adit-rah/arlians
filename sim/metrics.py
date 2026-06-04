@@ -99,6 +99,25 @@ class MetricsLogger:
     ``deaths_by_cause["exposure"]``
         Already tracked from Phase 1 — confirmed surfaced here.  Incremented by
         callers via ``logger.deaths["exposure"] += 1`` before ``record_step``.
+
+    Phase 6 new keys in year_summary()
+    ------------------------------------
+    ``n_predators``
+        Mean predator count alive per step this year.  Tracks predator-prey
+        population dynamics; should oscillate without total collapse.
+
+    ``walls_built``
+        Dict with keys ``end_of_year`` (WALL tile count at final recorded step)
+        and ``max`` (peak WALL tile count at any step this year).
+
+    ``weapons_held``
+        Mean count of living (non-predator) agents holding ``weapon==True``
+        per step this year.
+
+    ``predation_deaths`` and ``conflict_deaths``
+        Convenience top-level aliases for ``deaths_by_cause["predator"]`` and
+        ``deaths_by_cause["conflict"]``; surfaced for easy access without
+        traversing the nested dict.
     """
 
     def __init__(self, out_path: Optional[str] = None) -> None:
@@ -233,6 +252,25 @@ class MetricsLogger:
             self._genome_samples.append(store.genome[live_idx].mean(axis=0))
             self._lineage_count_samples.append(int(np.unique(store.lineage_id[live_idx]).size))
 
+        # --- Phase 6: predator count, walls, weapons ---
+        # n_predators: read from info if available (avoids recomputing), else count directly.
+        if info is not None and "n_predators" in info:
+            n_pred = int(info["n_predators"])
+        else:
+            n_pred = int(np.sum(store.alive & store.is_predator))
+        self._pred_count_samples.append(n_pred)
+
+        # walls_built: count WALL tiles (structure_type == 3) on the map.
+        wall_count = int(np.sum(state.structure_type == 3))
+        self._wall_count_samples.append(wall_count)
+
+        # weapons_held: count living (non-predator) agents with weapon==True.
+        if live_idx.size > 0:
+            weapons_now = int(np.sum(store.weapon[live_idx]))
+        else:
+            weapons_now = 0
+        self._weapons_held_samples.append(weapons_now)
+
     def year_summary(self) -> Dict[str, Any]:
         """Aggregate the accumulated steps into a per-year statistics dict.
 
@@ -354,6 +392,32 @@ class MetricsLogger:
         else:
             lineage_count = 0.0
 
+        # --- Phase 6 metrics ---
+        # n_predators: mean predator count per step.
+        if self._pred_count_samples:
+            n_predators = float(np.mean(self._pred_count_samples))
+        else:
+            n_predators = 0.0
+
+        # walls_built: end-of-year count and peak over the year.
+        if self._wall_count_samples:
+            walls_end = int(self._wall_count_samples[-1])
+            walls_max = int(max(self._wall_count_samples))
+        else:
+            walls_end = 0
+            walls_max = 0
+        walls_built = {"end_of_year": walls_end, "max": walls_max}
+
+        # weapons_held: mean living agents holding a weapon per step.
+        if self._weapons_held_samples:
+            weapons_held = float(np.mean(self._weapons_held_samples))
+        else:
+            weapons_held = 0.0
+
+        # predation_deaths / conflict_deaths: convenience aliases.
+        predation_deaths = int(self.deaths.get("predator", 0))
+        conflict_deaths  = int(self.deaths.get("conflict", 0))
+
         summary: Dict[str, Any] = {
             "population_mean":  pop_mean,
             "population_min":   pop_min,
@@ -373,6 +437,12 @@ class MetricsLogger:
             "mean_genome":         mean_genome_list,
             "genome_drift":        genome_drift,
             "lineage_count":       lineage_count,
+            # Phase 6 keys
+            "n_predators":         n_predators,
+            "walls_built":         walls_built,
+            "weapons_held":        weapons_held,
+            "predation_deaths":    predation_deaths,
+            "conflict_deaths":     conflict_deaths,
         }
 
         if self.out_path is not None:
@@ -415,3 +485,7 @@ class MetricsLogger:
         # Phase 5 accumulators
         self._genome_samples: list = []               # per-step mean genome (G,) over living agents
         self._lineage_count_samples: list[int] = []   # per-step distinct lineage count
+        # Phase 6 accumulators
+        self._pred_count_samples: list[int] = []      # per-step living predator count
+        self._wall_count_samples: list[int] = []      # per-step WALL tile count
+        self._weapons_held_samples: list[int] = []    # per-step count of armed living agents
