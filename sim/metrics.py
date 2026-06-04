@@ -77,6 +77,28 @@ class MetricsLogger:
         ``world.base_resources["soil_fertility"] >= 0.6``.  Settlement-on-
         fertile signal; mirrors how ``water_occupancy`` is computed.
         In [0, 1].
+
+    Phase 4 new keys in year_summary()
+    ------------------------------------
+    ``structures_built``
+        Dict with keys ``total``, ``shelters``, ``storage``, and ``max_total``
+        describing structure counts observed during the year.  ``total`` is the
+        count at the final recorded step; ``max_total`` is the peak seen at any
+        step (useful when structures decay).
+
+    ``stored_food_total``
+        Dict with keys ``mean`` (mean of ``sum(state.stored_food)`` over steps
+        this year) and ``max`` (peak sum seen at any step — should peak in fall
+        and be drawn down in winter if agents are banking food strategically).
+
+    ``mean_thermal``
+        Mean ``thermal`` drive value over living (non-predator) agents, averaged
+        across all steps this year.  Low in winter for unsheltered populations,
+        higher for sheltered ones.  In [0, 1].
+
+    ``deaths_by_cause["exposure"]``
+        Already tracked from Phase 1 — confirmed surfaced here.  Incremented by
+        callers via ``logger.deaths["exposure"] += 1`` before ``record_step``.
     """
 
     def __init__(self, out_path: Optional[str] = None) -> None:
@@ -183,6 +205,27 @@ class MetricsLogger:
             self._foraged_total  += float(info.get("foraged",  0))
             self._harvested_total += float(info.get("harvested", 0))
 
+        # --- Phase 4: structure counts ---
+        # Count structures on the map: total, shelters (type==1), storage (type==2).
+        struct = state.structure_type  # (H, W) int8
+        total_structs   = int(np.count_nonzero(struct))
+        shelter_count   = int(np.sum(struct == 1))
+        storage_count   = int(np.sum(struct == 2))
+        self._struct_total_samples.append(total_structs)
+        self._struct_shelter_samples.append(shelter_count)
+        self._struct_storage_samples.append(storage_count)
+
+        # --- Phase 4: stored food total ---
+        stored_sum = float(state.stored_food.sum())
+        self._stored_food_samples.append(stored_sum)
+
+        # --- Phase 4: mean thermal over living agents ---
+        if live_idx.size > 0:
+            mean_th = float(store.thermal[live_idx].mean())
+        else:
+            mean_th = 0.0
+        self._thermal_samples.append(mean_th)
+
     def year_summary(self) -> Dict[str, Any]:
         """Aggregate the accumulated steps into a per-year statistics dict.
 
@@ -255,6 +298,39 @@ class MetricsLogger:
         else:
             fertile_occupancy = 0.0
 
+        # --- Phase 4 metrics ---
+        # structures_built: track end-of-year count (last sample) and peak (max sample).
+        if self._struct_total_samples:
+            end_total    = self._struct_total_samples[-1]
+            max_total    = int(max(self._struct_total_samples))
+            end_shelters = self._struct_shelter_samples[-1]
+            end_storage  = self._struct_storage_samples[-1]
+        else:
+            end_total = max_total = end_shelters = end_storage = 0
+
+        structures_built = {
+            "total":      end_total,
+            "max_total":  max_total,
+            "shelters":   end_shelters,
+            "storage":    end_storage,
+        }
+
+        # stored_food_total: mean and max of per-step sums over the year.
+        if self._stored_food_samples:
+            sf_arr = np.asarray(self._stored_food_samples, dtype=np.float64)
+            stored_food_total = {
+                "mean": float(sf_arr.mean()),
+                "max":  float(sf_arr.max()),
+            }
+        else:
+            stored_food_total = {"mean": 0.0, "max": 0.0}
+
+        # mean_thermal: mean of per-step mean-thermals over the year.
+        if self._thermal_samples:
+            mean_thermal = float(np.mean(self._thermal_samples))
+        else:
+            mean_thermal = 0.0
+
         summary: Dict[str, Any] = {
             "population_mean":  pop_mean,
             "population_min":   pop_min,
@@ -266,6 +342,10 @@ class MetricsLogger:
             "water_occupancy":   water_occupancy,
             "pct_calories_farmed": pct_calories_farmed,
             "fertile_occupancy":   fertile_occupancy,
+            # Phase 4 keys
+            "structures_built":    structures_built,
+            "stored_food_total":   stored_food_total,
+            "mean_thermal":        mean_thermal,
         }
 
         if self.out_path is not None:
@@ -299,3 +379,9 @@ class MetricsLogger:
         self._harvested_total: float = 0.0    # total food units harvested from crops this year
         self._fertile_on_steps: float = 0.0   # agent-steps on soil_fertility >= 0.6 tiles
         self._fertile_total_steps: float = 0.0  # total living-agent-steps this year
+        # Phase 4 accumulators
+        self._struct_total_samples: list[int] = []    # per-step total structure count
+        self._struct_shelter_samples: list[int] = []  # per-step shelter count
+        self._struct_storage_samples: list[int] = []  # per-step storage count
+        self._stored_food_samples: list[float] = []   # per-step sum(state.stored_food)
+        self._thermal_samples: list[float] = []       # per-step mean thermal of living agents
