@@ -34,8 +34,8 @@ BIOME_COLORS: np.ndarray = np.array([
 ], dtype=np.uint8)
 
 # Overlay colours (RGB uint8)
-_AGENT_COLOR    = np.array([255, 220,   0], dtype=np.uint8)   # bright yellow
-_PREDATOR_COLOR = np.array([255,  40,  40], dtype=np.uint8)   # bright red
+_AGENT_COLOR    = np.array([255,  80, 220], dtype=np.uint8)   # magenta
+_PREDATOR_COLOR = np.array([140,   0,   0], dtype=np.uint8)   # dark red
 
 # Structure colours by type index (0 = none; 1 = shelter; 2 = storage; 3 = wall)
 _STRUCTURE_COLORS: dict[int, np.ndarray] = {
@@ -44,7 +44,10 @@ _STRUCTURE_COLORS: dict[int, np.ndarray] = {
     3: np.array([180, 180, 180], dtype=np.uint8),   # wall     — light grey
 }
 
-_CROP_COLOR = np.array([50, 210, 90], dtype=np.uint8)   # bright lime green
+_CROP_GROWING_LO = np.array([160, 220, 140], dtype=np.uint8)  # seedling
+_CROP_GROWING_HI = np.array([50, 210, 90], dtype=np.uint8)    # nearly mature
+_CROP_MATURE     = np.array([255, 210, 50], dtype=np.uint8)  # harvest-ready
+_CROP_COLOR = _CROP_GROWING_HI  # backward-compat alias
 
 
 def biome_basemap(world) -> np.ndarray:
@@ -66,12 +69,37 @@ def biome_basemap(world) -> np.ndarray:
     return BIOME_COLORS[idx]  # fancy-index into (10,3) -> (H,W,3)
 
 
+def _paint_crops(canvas: np.ndarray, state) -> None:
+    """Tint crop tiles by growth stage; dim when crop_health is low."""
+    stage = state.crop_stage
+    health = state.crop_health
+    active = stage > 0.0
+    if not active.any():
+        return
+
+    mature = active & (stage >= 1.0)
+    growing = active & ~mature
+
+    if mature.any():
+        h = health[mature][:, np.newaxis].astype(np.float32)
+        rgb = _CROP_MATURE.astype(np.float32) * (0.35 + 0.65 * h)
+        canvas[mature] = np.clip(rgb, 0, 255).astype(np.uint8)
+
+    if growing.any():
+        t = np.clip(stage[growing], 0.0, 1.0)[:, np.newaxis].astype(np.float32)
+        base = _CROP_GROWING_LO.astype(np.float32) * (1.0 - t) + _CROP_GROWING_HI.astype(
+            np.float32
+        ) * t
+        h = health[growing][:, np.newaxis].astype(np.float32)
+        canvas[growing] = np.clip(base * (0.35 + 0.65 * h), 0, 255).astype(np.uint8)
+
+
 def render_frame(world, state, store) -> np.ndarray:
     """Render a single simulation frame as an (H, W, 3) uint8 RGB array.
 
     Layers painted in order (each overwrites previous):
       1. Biome basemap.
-      2. Crop tiles  — ``state.crop_stage > 0`` tinted lime green.
+      2. Crop tiles  — pale→lime while growing; gold when mature; dim if rotting.
       3. Structures  — ``state.structure_type > 0``, colour per type.
       4. Living non-predator agents — bright yellow dots at (y, x).
       5. Living predators           — bright red dots at (y, x).
@@ -91,10 +119,7 @@ def render_frame(world, state, store) -> np.ndarray:
     """
     canvas = biome_basemap(world).copy()
 
-    # --- crop overlay ---
-    crop_mask = state.crop_stage > 0
-    if crop_mask.any():
-        canvas[crop_mask] = _CROP_COLOR
+    _paint_crops(canvas, state)
 
     # --- structure overlay ---
     struct_ys, struct_xs = np.where(state.structure_type > 0)

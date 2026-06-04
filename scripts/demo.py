@@ -1,19 +1,16 @@
 """
-Demo: watch an UNTRAINED policy (random weights) drive the Arlians.
+Demo: roll out an ArlianPolicy and render a top-down GIF.
 
-No training is performed — this instantiates ArlianPolicy with its random
-initialization and rolls it out, so you can see the baseline "before learning"
-behavior for reference. Expect aimless/near-random behavior: agents wander, act
-roughly uniformly over whatever the action mask allows, mostly fail to sustain
-themselves under the default economy (respawn_dead keeps the world populated).
+Loads random (untrained) weights by default, or pass --checkpoint for a trained
+policy. No training is performed.
 
 Outputs:
-  data/demo_untrained.gif  — animated top-down rollout
-  prints a one-year metrics summary
+  data/demo.gif  — default output path
+  prints a rollout metrics summary
 
 Run:
-  .venv/bin/python scripts/demo_untrained.py
-  .venv/bin/python scripts/demo_untrained.py --steps 360 --agents 800 --size 192
+  .venv/bin/python scripts/demo.py
+  .venv/bin/python scripts/demo.py --checkpoint runs/ckpt.pt --size 512 --agents 96
 """
 import argparse
 import sys
@@ -35,17 +32,20 @@ from train.policy import ArlianPolicy, DEVICE
 
 
 def main():
-    ap = argparse.ArgumentParser()
+    ap = argparse.ArgumentParser(description="Roll out ArlianPolicy and write a GIF.")
     ap.add_argument("--steps", type=int, default=200)
-    ap.add_argument("--agents", type=int, default=600)
+    ap.add_argument("--agents", type=int, default=200,
+                    help="initial living agents at reset")
+    ap.add_argument("--max-agents", type=int, default=None,
+                    help="entity slot cap (default: 3 * --agents)")
     ap.add_argument("--size", type=int, default=160)
     ap.add_argument("--seed", type=int, default=42)
-    ap.add_argument("--out", type=str, default="data/demo_untrained.gif")
+    ap.add_argument("--out", type=str, default="data/demo.gif")
     ap.add_argument("--render-every", type=int, default=3)
     ap.add_argument("--upscale", type=int, default=3)
     ap.add_argument("--checkpoint", type=str, default=None,
-                    help="load TRAINED policy weights from a checkpoint .pt; "
-                         "omit to use random (untrained) weights")
+                    help="load trained policy weights from a .pt checkpoint; "
+                         "omit for random (untrained) weights")
     args = ap.parse_args()
 
     torch.manual_seed(0)
@@ -53,12 +53,16 @@ def main():
 
     print(f"[demo] generating {args.size}x{args.size} world (seed={args.seed})...")
     world = World.generate(WorldConfig(width=args.size, height=args.size, seed=args.seed))
-    cfg = SimConfig(max_agents=args.agents * 3, init_agents=args.agents)
+    max_agents = args.max_agents if args.max_agents is not None else args.agents * 3
+    if args.agents > max_agents:
+        raise SystemExit(f"--agents ({args.agents}) must be <= --max-agents ({max_agents})")
+    cfg = SimConfig(max_agents=max_agents, init_agents=args.agents)
     sim = Simulation(world, cfg)
     sim.reset(seed=0)
 
     policy = ArlianPolicy(n_symbols=cfg.n_symbols).to(DEVICE)
-    if args.checkpoint:
+    trained = bool(args.checkpoint)
+    if trained:
         ckpt = torch.load(args.checkpoint, map_location=DEVICE)
         policy.load_state_dict(ckpt["policy"] if "policy" in ckpt else ckpt)
         tag = f"TRAINED ({args.checkpoint})"
@@ -94,13 +98,14 @@ def main():
 
     s = log.year_summary()
     print(f"\n[demo] wrote {args.out}  ({len(frames)} frames)")
-    print("[demo] untrained-policy rollout summary:")
+    print("[demo] rollout summary:")
     print(f"   population mean/min/max : {s['population_mean']:.0f}/{s['population_min']}/{s['population_max']}")
     print(f"   deaths_by_cause         : {s['deaths_by_cause']}")
     print(f"   pct_calories_farmed     : {s['pct_calories_farmed']:.3f}")
     print(f"   specialization_index    : {s['specialization_index']:.3f} nats")
     print(f"   signal_action_mi        : {s['signal_action_mi']:.3f} bits")
-    print("   (all near baseline — this is what 'before training' looks like)")
+    if not trained:
+        print("   (untrained baseline — compare against a --checkpoint run)")
 
 
 if __name__ == "__main__":

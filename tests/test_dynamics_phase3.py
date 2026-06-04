@@ -28,7 +28,7 @@ from sim.config import SimConfig
 from sim.state import WorldState, EntityStore
 from sim.simulation import Simulation, Actions
 from sim.actions import Action, N_PRIMARY, build_mask
-from sim.dynamics import crop_step, plant, harvest
+from sim.dynamics import crop_step, plant, harvest, _plant_success_prob
 
 
 # ---------------------------------------------------------------------------
@@ -547,6 +547,15 @@ def test_build_mask_plant_disabled_low_energy():
     assert not mask[agent, int(Action.PLANT)]
 
 
+def test_plant_success_prob_steep():
+    """Marginal fertility gives low success chance (cubic ramp, not linear)."""
+    cfg = _make_cfg()
+    assert _plant_success_prob(0.10, cfg) == 0.0
+    assert _plant_success_prob(0.30, cfg) < 0.05
+    assert _plant_success_prob(0.45, cfg) < 0.35
+    assert _plant_success_prob(0.60, cfg) == 1.0
+
+
 def test_plant_cost_on_fail_low_fertility():
     """Failed plant on barren soil still costs energy and leaves tile empty."""
     cfg = _make_cfg()
@@ -617,11 +626,14 @@ def test_step_info_planted_increments():
     sea_level = world.cfg.sea_level
     land_ys, land_xs = np.where(world.elevation >= sea_level)
 
-    # Scatter agents to different land tiles to avoid tile collisions
+    # Place agents on the best fertility land tiles (steep p makes random scatter flaky)
+    soil = world.base_resources["soil_fertility"]
+    on_land = world.elevation >= sea_level
+    ranked = np.argsort(np.where(on_land, soil, -1.0).ravel())[::-1]
     for i, slot in enumerate(live_idx):
-        i2 = i % len(land_ys)
-        sim.store.y[slot] = int(land_ys[i2 + (i * 7) % max(1, len(land_ys) - i)])
-        sim.store.x[slot] = int(land_xs[i2 + (i * 7) % max(1, len(land_ys) - i)])
+        flat = int(ranked[i % ranked.size])
+        sim.store.y[slot] = flat // soil.shape[1]
+        sim.store.x[slot] = flat % soil.shape[1]
 
     M = cfg.max_agents
     primary = np.full(M, int(Action.NOOP), dtype=np.int32)

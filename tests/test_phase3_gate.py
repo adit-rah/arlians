@@ -752,28 +752,24 @@ def test_render_phase3_farm_png():
         f"Output file not found or empty: {out_path}"
     )
 
-    # Sanity: at least some crop tiles should be present (lime-green pixels).
-    # Note: agent dots (yellow) overwrite crop pixels when agents occupy crop tiles,
-    # so we only check tiles that have NO agent on them.
-    from sim.render import _CROP_COLOR
+    from sim.render import _CROP_MATURE, biome_basemap
     crop_mask = state.crop_stage > 0
     n_crop_tiles = int(crop_mask.sum())
+    mature_mask = state.crop_stage >= 1.0
 
     if n_crop_tiles > 0:
-        # Build a set of agent positions (they overwrite crop pixels)
         agent_ys = store.y[store.alive & ~store.is_predator]
         agent_xs = store.x[store.alive & ~store.is_predator]
         agent_pos_mask = np.zeros(state.crop_stage.shape, dtype=bool)
         if agent_ys.size > 0:
             agent_pos_mask[agent_ys, agent_xs] = True
 
-        # Crop tiles with no agent on them should be lime-green
-        unoccupied_crop = crop_mask & ~agent_pos_mask
-        if unoccupied_crop.any():
-            crop_pixels = frame[unoccupied_crop]
-            assert np.all(crop_pixels == _CROP_COLOR), (
-                "Unoccupied crop tiles should be rendered in lime-green"
-            )
+        unoccupied = crop_mask & ~agent_pos_mask
+        if unoccupied.any():
+            assert not np.array_equal(frame[unoccupied], biome_basemap(world)[unoccupied])
+        vis_mature = mature_mask & ~agent_pos_mask
+        if vis_mature.any():
+            assert np.any(np.all(frame[vis_mature] == _CROP_MATURE, axis=-1))
 
     print(
         f"\n[viz] rendered {n_crop_tiles} crop tiles to: {out_path}"

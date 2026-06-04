@@ -428,15 +428,15 @@ _PLANT_FERTILE_CAP = 0.6
 
 
 def _plant_success_prob(eff_fert: float, cfg: SimConfig) -> float:
-    """Linear ramp: 0 below crop_min_fertility, 1 at _PLANT_FERTILE_CAP and above."""
+    """Steep ramp: 0 below crop_min_fertility, ~1 at _PLANT_FERTILE_CAP (cubic in between)."""
     if eff_fert < cfg.crop_min_fertility:
         return 0.0
     if eff_fert >= _PLANT_FERTILE_CAP:
         return 1.0
-    return float(
-        (eff_fert - cfg.crop_min_fertility)
-        / (_PLANT_FERTILE_CAP - cfg.crop_min_fertility)
+    t = (eff_fert - cfg.crop_min_fertility) / (
+        _PLANT_FERTILE_CAP - cfg.crop_min_fertility
     )
+    return float(t * t * t)
 
 
 def plant(
