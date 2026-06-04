@@ -276,7 +276,10 @@ def train(
         _ = sim.reset(seed=0)
 
     for update_i in range(start_update, n_updates):
-        # ---- collect ----
+        print(
+            f"[train] {update_i + 1}/{n_updates} collecting rollout ({T} steps)...",
+            flush=True,
+        )
         buffer = collect(sim, policy, T, seed_offset=update_i * T, use_respawn=use_respawn)
 
         # Mean reward across valid (alive) timesteps

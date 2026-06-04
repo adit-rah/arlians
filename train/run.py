@@ -72,11 +72,15 @@ def main() -> None:
 
     def log_fn(row):
         u = row["update"]
-        if u % 5 == 0 or u == args.updates - 1:
-            el = time.time() - t0
-            print(f"  upd {u:>5}  reward={row['mean_reward']:.3f}  return={row['mean_return']:.2f}"
-                  f"  vloss={row['value_loss']:.3f}  ent={row['entropy']:.3f}"
-                  f"  living={row['n_living']:>5}  ({el:.0f}s, {(u+1)/max(el,1e-9):.2f} upd/s)")
+        el = time.time() - t0
+        print(
+            f"[train] {u + 1}/{args.updates} done  "
+            f"reward={row['mean_reward']:.3f}  return={row['mean_return']:.2f}  "
+            f"vloss={row['value_loss']:.3f}  ent={row['entropy']:.3f}  "
+            f"living={row['n_living']:>5}  "
+            f"({el:.0f}s, {(u + 1) / max(el, 1e-9):.2f} upd/s)",
+            flush=True,
+        )
         if log_file:
             log_file.write(json.dumps(row) + "\n"); log_file.flush()
 

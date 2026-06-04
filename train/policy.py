@@ -10,7 +10,7 @@ Architecture:
 The primary action mask (build_mask output) is applied as a -inf additive mask before
 sampling so no illegal action is ever selected (§3.1 action masking).
 
-Device: MPS if available else CPU (§3.1, §5).
+Device: CUDA if available, else MPS, else CPU (§3.1, §5).
 """
 from __future__ import annotations
 
@@ -32,7 +32,9 @@ _NEG_INF = float("-inf")
 
 
 def _get_device() -> torch.device:
-    """Return MPS if available, else CPU (§5)."""
+    """Return CUDA if available, else MPS, else CPU (§5)."""
+    if torch.cuda.is_available():
+        return torch.device("cuda")
     if torch.backends.mps.is_available():
         return torch.device("mps")
     return torch.device("cpu")
