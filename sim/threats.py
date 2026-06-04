@@ -8,11 +8,187 @@ Filled by the env-dynamics fleet role:
 """
 from __future__ import annotations
 
-from typing import Set
+from typing import Set, List, Dict, Any
 import numpy as np
 
 from .config import SimConfig
 from .state import EntityStore, WorldState
+
+# ---------------------------------------------------------------------------
+# Phase 7 catastrophe helpers
+# ---------------------------------------------------------------------------
+
+_CATASTROPHE_TYPES = ["cold_snap", "drought", "flood", "storm"]
+
+
+def roll_catastrophe(
+    events: List[Dict[str, Any]],
+    world,
+    t: int,
+    cfg: SimConfig,
+    rng: np.random.Generator,
+) -> List[Dict[str, Any]]:
+    """
+    With probability catastrophe_prob each step, append a new event dict to events.
+
+    New event dict keys:
+      type       : one of "cold_snap" / "drought" / "flood" / "storm"
+      cy, cx     : centre tile (random land tile)
+      radius     : cfg.catastrophe_radius
+      magnitude  : cfg.catastrophe_magnitude
+      expiry     : t + cfg.catastrophe_duration
+
+    Returns the updated events list.
+    """
+    if rng.random() >= cfg.catastrophe_prob:
+        return events
+
+    # Pick a random land tile for the event centre
+    sea = world.cfg.sea_level
+    land_ys, land_xs = np.where(world.elevation >= sea)
+    if land_ys.size == 0:
+        return events  # degenerate world — no land
+
+    idx = int(rng.integers(0, land_ys.size))
+    cy = int(land_ys[idx])
+    cx = int(land_xs[idx])
+
+    etype = _CATASTROPHE_TYPES[int(rng.integers(0, len(_CATASTROPHE_TYPES)))]
+
+    event: Dict[str, Any] = {
+        "type":      etype,
+        "cy":        cy,
+        "cx":        cx,
+        "radius":    cfg.catastrophe_radius,
+        "magnitude": cfg.catastrophe_magnitude,
+        "expiry":    t + cfg.catastrophe_duration,
+    }
+    return events + [event]
+
+
+def apply_catastrophes(
+    state: WorldState,
+    store: EntityStore,
+    world,
+    events: List[Dict[str, Any]],
+    t: int,
+    cfg: SimConfig,
+) -> List[Dict[str, Any]]:
+    """
+    1. Rebuild state.event_mask to 1.0 everywhere.
+    2. For each ACTIVE event (t < expiry): set event_mask to magnitude inside a
+       bbox of +-radius around (cy, cx), then apply per-type effects inside that
+       region (modest, transient).
+    3. Drop expired events (t >= expiry).
+    Returns the surviving events list.
+
+    Per-type effects (all modest to preserve homeostatic challenge, not instant kill):
+      cold_snap : agents inside region take health -= cfg.exposure_damage each step.
+      drought   : wild_remaining and crop_stage in region reduced (multiplied by
+                  magnitude each step, clamped ≥ 0).
+      flood     : agents on river tiles inside region take health -= cfg.exposure_damage;
+                  stored_food in region reduced slightly.
+      storm     : structure_hp in region damaged (-= cfg.structure_decay * 10 per step),
+                  destroying fully decayed structures.
+    """
+    H, W = state.event_mask.shape
+
+    # Reset event_mask to neutral
+    state.event_mask[:] = np.float32(1.0)
+
+    surviving: List[Dict[str, Any]] = []
+
+    for ev in events:
+        if t >= ev["expiry"]:
+            continue  # expired — drop it
+
+        surviving.append(ev)
+
+        cy: int = ev["cy"]
+        cx: int = ev["cx"]
+        r:  int = ev["radius"]
+        mag: float = float(ev["magnitude"])
+        etype: str = ev["type"]
+
+        # Compute bbox (clipped to grid)
+        y0 = max(0, cy - r)
+        y1 = min(H, cy + r + 1)
+        x0 = max(0, cx - r)
+        x1 = min(W, cx + r + 1)
+
+        # Overlay: event_mask set to magnitude inside bbox
+        # Use minimum so overlapping events stack toward lower multiplier
+        state.event_mask[y0:y1, x0:x1] = np.minimum(
+            state.event_mask[y0:y1, x0:x1],
+            np.float32(mag),
+        )
+
+        # ------------------------------------------------------------------
+        # Per-type effects inside bbox
+        # ------------------------------------------------------------------
+        if etype == "cold_snap":
+            # All living (non-predator) agents inside the region take extra cold damage
+            agent_mask = store.alive & ~store.is_predator
+            agent_idx = np.flatnonzero(agent_mask)
+            if agent_idx.size > 0:
+                ays = store.y[agent_idx]
+                axs = store.x[agent_idx]
+                in_region = (ays >= y0) & (ays < y1) & (axs >= x0) & (axs < x1)
+                affected = agent_idx[in_region]
+                if affected.size > 0:
+                    store.health[affected] = np.maximum(
+                        np.float32(0.0),
+                        store.health[affected] - np.float32(cfg.exposure_damage),
+                    )
+
+        elif etype == "drought":
+            # Suppress wild food and crop growth in region
+            state.wild_remaining[y0:y1, x0:x1] = np.maximum(
+                np.float32(0.0),
+                state.wild_remaining[y0:y1, x0:x1] * np.float32(mag),
+            )
+            state.crop_stage[y0:y1, x0:x1] = np.maximum(
+                np.float32(0.0),
+                state.crop_stage[y0:y1, x0:x1] * np.float32(mag),
+            )
+
+        elif etype == "flood":
+            # Agents on river tiles inside region take health damage
+            river_mask = world.river_mask  # (H, W) bool / float
+            agent_mask = store.alive & ~store.is_predator
+            agent_idx = np.flatnonzero(agent_mask)
+            if agent_idx.size > 0:
+                ays = store.y[agent_idx]
+                axs = store.x[agent_idx]
+                in_region = (ays >= y0) & (ays < y1) & (axs >= x0) & (axs < x1)
+                # On or near river: river_mask > 0
+                on_river = river_mask[ays, axs].astype(bool)
+                affected = agent_idx[in_region & on_river]
+                if affected.size > 0:
+                    store.health[affected] = np.maximum(
+                        np.float32(0.0),
+                        store.health[affected] - np.float32(cfg.exposure_damage),
+                    )
+            # Also reduce stored food slightly in flood region
+            state.stored_food[y0:y1, x0:x1] = np.maximum(
+                np.float32(0.0),
+                state.stored_food[y0:y1, x0:x1] * np.float32(mag),
+            )
+
+        elif etype == "storm":
+            # Damage structures inside the region
+            has_structure = state.structure_type[y0:y1, x0:x1] > 0
+            dmg = np.float32(cfg.structure_decay * 10.0)
+            state.structure_hp[y0:y1, x0:x1] = np.where(
+                has_structure,
+                np.maximum(np.float32(0.0), state.structure_hp[y0:y1, x0:x1] - dmg),
+                state.structure_hp[y0:y1, x0:x1],
+            ).astype(np.float32)
+            # Clear destroyed structures (hp == 0 and was a structure)
+            destroyed = has_structure & (state.structure_hp[y0:y1, x0:x1] <= 0.0)
+            state.structure_type[y0:y1, x0:x1][destroyed] = np.int8(0)
+
+    return surviving
 
 
 # ---------------------------------------------------------------------------

@@ -517,6 +517,8 @@ def test_200_step_smoke_run():
         # disable predators: this smoke test targets Phase-1 forage/survive dynamics;
         # predator pressure from Phase 6 would kill random-acting agents too quickly.
         pred_per_agents=0.0,
+        # disable catastrophes (Phase 7) too — same reason; this is a survival smoke.
+        catastrophe_prob=0.0,
     )
     sim = Simulation(world, cfg)
     sim.reset(seed=7)

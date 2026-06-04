@@ -167,7 +167,7 @@ class Simulation:
             resolve_combat, craft_weapon,
         )
         from .reproduce import resolve_deaths, reproduce as _reproduce
-        from .threats import update_scent, spawn_predators, step_predators
+        from .threats import update_scent, spawn_predators, step_predators, roll_catastrophe, apply_catastrophes
         from world.seasons import compute_season_state
 
         cfg   = self.cfg
@@ -305,6 +305,20 @@ class Simulation:
         # REST (Action.REST) is already a no-op — nothing to do.
 
         # ------------------------------------------------------------------
+        # 4e. Signaling (Phase 7): record the emit symbol for each living agent
+        #     so that it is visible to neighbours via obs channel 23 next step.
+        #     Clip to [0, n_symbols) to guard against out-of-range values.
+        # ------------------------------------------------------------------
+        if living.any():
+            live_emit_idx = np.flatnonzero(living)
+            clipped = np.clip(
+                actions.emit[live_emit_idx].astype(np.int32),
+                0,
+                cfg.n_symbols - 1,
+            ).astype(np.int8)
+            store.last_signal[live_emit_idx] = clipped
+
+        # ------------------------------------------------------------------
         # 5. World dynamics: regrow wild food, advance crop growth/rot,
         #    spoil carried food, structure decay, spoil stored food (Phase 4)
         # ------------------------------------------------------------------
@@ -329,6 +343,21 @@ class Simulation:
         pred_result = step_predators(store, state, world, cfg, pred_rng)
         predator_slots_this_step = pred_result["predator_slots"]
         n_predators_now = int((store.alive & store.is_predator).sum())
+
+        # ------------------------------------------------------------------
+        # 5c. Catastrophe phase (Phase 7 §2.7):
+        #   a. Lazily initialise the active-events list on the sim instance.
+        #   b. roll_catastrophe: with prob catastrophe_prob, start a new event.
+        #   c. apply_catastrophes: rebuild event_mask, apply per-type effects,
+        #      drop expired events.
+        # Uses a deterministic per-step RNG seeded from self.t (offset 7_000_000).
+        # ------------------------------------------------------------------
+        if not hasattr(self, "_events"):
+            self._events: list = []
+        cat_rng = np.random.default_rng(self.t + 7_000_000)
+        self._events = roll_catastrophe(self._events, world, self.t, cfg, cat_rng)
+        self._events = apply_catastrophes(state, store, world, self._events, self.t, cfg)
+        n_catastrophes_now = len(self._events)
 
         # ------------------------------------------------------------------
         # 6. Drive decay + health update + death resolution
@@ -416,17 +445,19 @@ class Simulation:
             reward=reward,
             done=done_mask,
             info={
-                "t":               self.t,
-                "n_agents":        self.store.n_living_agents(),
-                "n_predators":     n_predators_now,
-                "deaths":          n_deaths,
-                "births":          births_this_step,
-                "foraged":         foraged_total,
-                "harvested":       harvested_total,
-                "planted":         planted_total,
-                "built":           built_total,
-                "weapons_crafted": weapons_crafted,
-                "attacks":         int(attackers.size),
+                "t":                  self.t,
+                "n_agents":           self.store.n_living_agents(),
+                "n_predators":        n_predators_now,
+                "deaths":             n_deaths,
+                "births":             births_this_step,
+                "foraged":            foraged_total,
+                "harvested":          harvested_total,
+                "planted":            planted_total,
+                "built":              built_total,
+                "weapons_crafted":    weapons_crafted,
+                "attacks":            int(attackers.size),
+                "n_catastrophes":     n_catastrophes_now,
+                "catastrophe_active": n_catastrophes_now > 0,
             },
         )
 
