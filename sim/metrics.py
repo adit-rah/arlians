@@ -7,6 +7,8 @@ Phase 1 additions: mean_displacement (settlement/nomadism signal),
 Later phases add: pct_calories_farmed, winter_survival_rate, settlement_clustering,
 signal<->action MI, specialization index, gene-frequency drift, etc.
 
+Phase 7 additions: catastrophe_steps, specialization_index, signal_action_mi.
+
 Outputs JSONL (one JSON object per year, newline-delimited), optionally to a file.
 """
 from __future__ import annotations
@@ -20,6 +22,128 @@ import numpy as np
 # Death causes tracked from Phase 1 onwards.  Phase-0 counters stay at zero
 # until the relevant damage logic is wired in.
 _DEATH_CAUSES = ("starve", "dehydrate", "exposure", "predator", "conflict", "age")
+
+# Minimum number of actions an agent must have taken this year to be included
+# in the specialization-index sample (avoids tiny, noisy distributions).
+_MIN_ACTIONS_FOR_SPEC = 5
+
+# Maximum number of agents sampled when computing pairwise JS divergence.
+# Keeps the O(n^2) computation cheap.
+_SPEC_SAMPLE_SIZE = 50
+
+
+def _js_divergence(p: np.ndarray, q: np.ndarray) -> float:
+    """Jensen-Shannon divergence between two discrete distributions (nats).
+
+    Both ``p`` and ``q`` must already be normalized (sum to 1.0) and have
+    length > 0.  Returns a value in [0, ln(2)].
+    """
+    m = 0.5 * (p + q)
+    # KL(p || m) + KL(q || m); use xlogy convention (0 * log(0) = 0)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        kl_pm = np.where(p > 0, p * np.log(p / np.where(m > 0, m, 1.0)), 0.0)
+        kl_qm = np.where(q > 0, q * np.log(q / np.where(m > 0, m, 1.0)), 0.0)
+    return float(0.5 * kl_pm.sum() + 0.5 * kl_qm.sum())
+
+
+def _compute_specialization_index(agent_action_hist: dict) -> float:
+    """Compute mean pairwise Jensen-Shannon divergence over a sample of agents.
+
+    Parameters
+    ----------
+    agent_action_hist : dict
+        Maps slot_int -> int array of action counts (length N_PRIMARY).
+
+    Returns
+    -------
+    float
+        Mean pairwise JS divergence.  0.0 if all agents behave identically or
+        fewer than 2 eligible agents are present.
+    """
+    # Filter agents with enough action samples
+    eligible = [
+        hist.astype(np.float64)
+        for hist in agent_action_hist.values()
+        if hist.sum() >= _MIN_ACTIONS_FOR_SPEC
+    ]
+    if len(eligible) < 2:
+        return 0.0
+
+    # Sub-sample to keep computation O(sample^2)
+    rng = np.random.default_rng(0)
+    if len(eligible) > _SPEC_SAMPLE_SIZE:
+        idxs = rng.choice(len(eligible), size=_SPEC_SAMPLE_SIZE, replace=False)
+        eligible = [eligible[i] for i in idxs]
+
+    # Normalize each histogram to a probability distribution
+    dists = []
+    for h in eligible:
+        s = h.sum()
+        dists.append(h / s if s > 0 else h)
+
+    # Mean pairwise JS divergence (upper triangle only)
+    n = len(dists)
+    total = 0.0
+    count = 0
+    for i in range(n):
+        for j in range(i + 1, n):
+            total += _js_divergence(dists[i], dists[j])
+            count += 1
+
+    return float(total / count) if count > 0 else 0.0
+
+
+def _compute_signal_action_mi(signal_action_pairs: list) -> float:
+    """Compute mutual information (bits) between signal and primary action.
+
+    Parameters
+    ----------
+    signal_action_pairs : list of (n, 2) int arrays
+        Each row is a (signal, action) pair from one step's living agents.
+
+    Returns
+    -------
+    float
+        MI in bits.  0.0 if no data.
+    """
+    if not signal_action_pairs:
+        return 0.0
+
+    all_pairs = np.concatenate(signal_action_pairs, axis=0)  # (N, 2)
+    signals  = all_pairs[:, 0]
+    actions_ = all_pairs[:, 1]
+
+    if signals.size == 0:
+        return 0.0
+
+    # Determine vocabulary sizes from the data
+    n_sig = int(signals.max()) + 1
+    from .actions import N_PRIMARY
+    n_act = N_PRIMARY
+
+    # Joint count matrix (n_sig, n_act)
+    joint = np.zeros((n_sig, n_act), dtype=np.float64)
+    for s, a in zip(signals.tolist(), actions_.tolist()):
+        if 0 <= s < n_sig and 0 <= a < n_act:
+            joint[s, a] += 1.0
+
+    total = joint.sum()
+    if total == 0:
+        return 0.0
+
+    joint /= total
+    p_s = joint.sum(axis=1, keepdims=True)   # (n_sig, 1)
+    p_a = joint.sum(axis=0, keepdims=True)   # (1, n_act)
+    expected = p_s * p_a                      # independent product
+
+    with np.errstate(divide="ignore", invalid="ignore"):
+        log_ratio = np.where(
+            (joint > 0) & (expected > 0),
+            np.log2(joint / np.where(expected > 0, expected, 1.0)),
+            0.0,
+        )
+    mi_bits = float((joint * log_ratio).sum())
+    return max(0.0, mi_bits)  # numerical safety: MI >= 0
 
 
 class MetricsLogger:
@@ -118,6 +242,29 @@ class MetricsLogger:
         Convenience top-level aliases for ``deaths_by_cause["predator"]`` and
         ``deaths_by_cause["conflict"]``; surfaced for easy access without
         traversing the nested dict.
+
+    Phase 7 new keys in year_summary()
+    ------------------------------------
+    ``catastrophe_steps``
+        Fraction of steps this year with an active catastrophe (info dict must
+        be provided via ``record_step(..., info=...)``; requires
+        ``info["catastrophe_active"]`` or ``info["n_catastrophes"] > 0``).
+        If no info was provided this year, reports 0.0.  In [0, 1].
+
+    ``specialization_index``
+        Mean pairwise Jensen-Shannon divergence between per-agent action
+        distributions accumulated over the year.  0.0 means all agents behave
+        identically; higher values indicate differentiated roles.  Requires
+        ``actions`` to be passed to ``record_step``; reports 0.0 if no action
+        data was collected.  In [0, log(2)] (nats); typically in [0, 1].
+
+    ``signal_action_mi``
+        Mutual information (bits) between an agent's emitted signal
+        (``store.last_signal``) and its next primary action — evidence the
+        signal channel is used rather than random.  Accumulates joint counts
+        of (signal, action) pairs across agents/steps when ``actions`` is
+        provided (same-step approximation: signal from current ``store.last_signal``
+        paired with action taken this step).  Reports 0.0 if no data.  In bits.
     """
 
     def __init__(self, out_path: Optional[str] = None) -> None:
@@ -128,7 +275,7 @@ class MetricsLogger:
     # Public API
     # ------------------------------------------------------------------
 
-    def record_step(self, sim, info=None) -> None:
+    def record_step(self, sim, info=None, actions=None) -> None:
         """Accumulate statistics for the current simulation step.
 
         Parameters
@@ -140,7 +287,15 @@ class MetricsLogger:
             Optional per-step info dict from ``StepOut.info``.  When provided,
             ``info.get("foraged", 0)`` and ``info.get("harvested", 0)`` are
             accumulated into the calorie-source-split totals for the year.
+            Phase 7: ``info["catastrophe_active"]`` or ``info["n_catastrophes"]``
+            increments the ``catastrophe_steps`` accumulator.
             Existing single-argument call sites pass nothing and are unaffected.
+        actions : sim.simulation.Actions or array-like or None
+            Optional Actions object (or its ``.primary`` array directly) from
+            the current step.  When provided, per-agent action histograms are
+            accumulated for ``specialization_index``, and (signal, action) joint
+            counts are accumulated for ``signal_action_mi``.  Backward-compatible:
+            existing call sites that omit this argument are unaffected.
         """
         store = sim.store
         state = sim.state
@@ -270,6 +425,46 @@ class MetricsLogger:
         else:
             weapons_now = 0
         self._weapons_held_samples.append(weapons_now)
+
+        # --- Phase 7: catastrophe_steps ---
+        # Count this step as a "catastrophe step" if catastrophe_active is True
+        # OR n_catastrophes > 0 in the info dict.
+        self._total_info_steps += 1
+        if info is not None:
+            self._total_info_steps_with_data += 1
+            is_cat = bool(info.get("catastrophe_active", False)) or int(info.get("n_catastrophes", 0)) > 0
+            if is_cat:
+                self._catastrophe_step_count += 1
+
+        # --- Phase 7: specialization_index + signal_action_mi ---
+        # Both require the actions argument to be provided.
+        if actions is not None and live_idx.size > 0:
+            # Extract primary action array: support Actions objects or raw arrays.
+            if hasattr(actions, "primary"):
+                primary_arr = np.asarray(actions.primary, dtype=np.int32)
+            else:
+                primary_arr = np.asarray(actions, dtype=np.int32)
+
+            # Per-agent action histogram accumulation for specialization_index.
+            # _agent_action_hist: dict of slot_int -> int array of length N_PRIMARY
+            from .actions import N_PRIMARY
+            for slot in live_idx:
+                s = int(slot)
+                a = int(primary_arr[s])
+                if s not in self._agent_action_hist:
+                    self._agent_action_hist[s] = np.zeros(N_PRIMARY, dtype=np.int64)
+                if 0 <= a < N_PRIMARY:
+                    self._agent_action_hist[s][a] += 1
+
+            # (signal, action) joint count accumulation for signal_action_mi.
+            # Use same-step approximation: last_signal paired with this-step primary.
+            signals = store.last_signal[live_idx].astype(np.int32)   # (n_live,)
+            actions_live = primary_arr[live_idx]                       # (n_live,)
+            n_sym = max(1, int(np.max(signals)) + 1) if signals.size > 0 else 1
+            # Store raw (signal, action) pairs for end-of-year MI computation.
+            self._signal_action_pairs.append(
+                np.stack([signals, actions_live], axis=1)  # (n_live, 2)
+            )
 
     def year_summary(self) -> Dict[str, Any]:
         """Aggregate the accumulated steps into a per-year statistics dict.
@@ -418,6 +613,22 @@ class MetricsLogger:
         predation_deaths = int(self.deaths.get("predator", 0))
         conflict_deaths  = int(self.deaths.get("conflict", 0))
 
+        # --- Phase 7 metrics ---
+
+        # catastrophe_steps: fraction of info-providing steps with active catastrophe.
+        if self._total_info_steps_with_data > 0:
+            catastrophe_steps = float(self._catastrophe_step_count / self._total_info_steps_with_data)
+        else:
+            catastrophe_steps = 0.0
+
+        # specialization_index: mean pairwise Jensen-Shannon divergence between
+        # per-agent normalized action distributions.  Sample up to 50 agents with
+        # a minimum action count to avoid degenerate distributions.
+        specialization_index = _compute_specialization_index(self._agent_action_hist)
+
+        # signal_action_mi: mutual information (bits) between signal and action.
+        signal_action_mi = _compute_signal_action_mi(self._signal_action_pairs)
+
         summary: Dict[str, Any] = {
             "population_mean":  pop_mean,
             "population_min":   pop_min,
@@ -443,6 +654,10 @@ class MetricsLogger:
             "weapons_held":        weapons_held,
             "predation_deaths":    predation_deaths,
             "conflict_deaths":     conflict_deaths,
+            # Phase 7 keys
+            "catastrophe_steps":   catastrophe_steps,
+            "specialization_index": specialization_index,
+            "signal_action_mi":    signal_action_mi,
         }
 
         if self.out_path is not None:
@@ -489,3 +704,13 @@ class MetricsLogger:
         self._pred_count_samples: list[int] = []      # per-step living predator count
         self._wall_count_samples: list[int] = []      # per-step WALL tile count
         self._weapons_held_samples: list[int] = []    # per-step count of armed living agents
+        # Phase 7 accumulators
+        self._total_info_steps: int = 0               # steps where record_step was called
+        self._total_info_steps_with_data: int = 0     # steps where info was provided
+        self._catastrophe_step_count: int = 0         # steps with active catastrophe
+        # Per-agent action histogram: slot_int -> int array of length N_PRIMARY.
+        # Accumulated over the year; used to compute specialization_index.
+        self._agent_action_hist: Dict[int, Any] = {}
+        # List of (n_live, 2) arrays of (signal, action) pairs, one per step.
+        # Accumulated when actions is provided; used to compute signal_action_mi.
+        self._signal_action_pairs: list = []
