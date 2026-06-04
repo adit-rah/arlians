@@ -43,6 +43,9 @@ def main():
     ap.add_argument("--out", type=str, default="data/demo_untrained.gif")
     ap.add_argument("--render-every", type=int, default=3)
     ap.add_argument("--upscale", type=int, default=3)
+    ap.add_argument("--checkpoint", type=str, default=None,
+                    help="load TRAINED policy weights from a checkpoint .pt; "
+                         "omit to use random (untrained) weights")
     args = ap.parse_args()
 
     torch.manual_seed(0)
@@ -54,11 +57,16 @@ def main():
     sim = Simulation(world, cfg)
     sim.reset(seed=0)
 
-    # UNTRAINED policy — random initialization, no learning whatsoever
     policy = ArlianPolicy(n_symbols=cfg.n_symbols).to(DEVICE)
+    if args.checkpoint:
+        ckpt = torch.load(args.checkpoint, map_location=DEVICE)
+        policy.load_state_dict(ckpt["policy"] if "policy" in ckpt else ckpt)
+        tag = f"TRAINED ({args.checkpoint})"
+    else:
+        tag = "untrained (random weights)"
     policy.eval()
-    print(f"[demo] untrained ArlianPolicy on {DEVICE} "
-          f"({sum(p.numel() for p in policy.parameters()):,} params, random weights)")
+    print(f"[demo] {tag} ArlianPolicy on {DEVICE} "
+          f"({sum(p.numel() for p in policy.parameters()):,} params)")
 
     log = MetricsLogger()
     frames = []
