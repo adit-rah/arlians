@@ -160,6 +160,7 @@ def test_farming_produces_calories():
     state.crop_owner[py, px]  = -1
 
     logger = MetricsLogger()
+    sim.t = 180  # growing season — reliable plant success on prime tile
 
     # Step 1: PLANT
     out = sim.step(_single_action_for_slot(cfg, slot, Action.PLANT))
@@ -233,6 +234,7 @@ def _run_farmer_policy(sim: Simulation, n_steps: int, prime_y: int, prime_x: int
 
     total_food = 0.0
     phase = "plant"  # plant -> grow -> harvest -> eat -> plant ...
+    sim.t = 180  # growing season for plant attempts
 
     for step in range(n_steps):
         if phase == "plant":
