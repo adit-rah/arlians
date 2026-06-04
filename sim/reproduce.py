@@ -13,6 +13,7 @@ from __future__ import annotations
 from typing import Optional, NamedTuple
 import numpy as np
 
+from .config import SimConfig
 from .state import EntityStore
 
 
@@ -125,3 +126,108 @@ def resolve_deaths(
     store.last_signal[idx]  = 0
 
     return died_mask
+
+
+def reproduce(
+    store: EntityStore,
+    idx: np.ndarray,
+    cfg: SimConfig,
+    rng: np.random.Generator,
+    H: int,
+    W: int,
+) -> int:
+    """
+    Process REPRODUCE actions for living agents in `idx` (build-spec §2.8, Phase 5).
+
+    For each parent in ascending slot order:
+      - Requires at least one free slot (global soft cap).
+      - Child slot = next available free slot (allocated greedily so two parents
+        don't grab the same slot).
+      - Child position = parent (y, x) + uniform random offset in [-2, 2] each axis,
+        clamped to [0, H-1] / [0, W-1] for kin clustering (§G).
+      - child.genome = clip(parent.genome + rng.normal(0, mutation_sigma, G), 0, 1).
+      - child.lineage_id = parent.lineage_id  (kin share lineage).
+      - Child initialised alive, energy=0.5, hydration=1.0, thermal=1.0, health=1.0,
+        age=0, repro_cd=cfg.repro_cooldown, is_predator=False, inventory zeroed.
+      - Parent: energy -= cfg.repro_energy_cost; repro_cd = cfg.repro_cooldown.
+
+    Returns the number of successful births.
+    If no free slot exists when a parent is processed, that parent is skipped (soft cap).
+
+    Parameters
+    ----------
+    store : EntityStore
+        Mutable entity store modified in-place.
+    idx : np.ndarray
+        Indices of living agents that chose REPRODUCE and passed the energy/cd gate.
+        Processed in ascending order (as passed; caller should supply ascending).
+    cfg : SimConfig
+        Simulation configuration (repro_energy_cost, repro_cooldown, mutation_sigma).
+    rng : np.random.Generator
+        Seeded NumPy RNG for deterministic mutation and offset sampling.
+    H, W : int
+        Grid height and width for clamping child positions.
+
+    Returns
+    -------
+    int
+        Number of births this call.
+    """
+    if idx.size == 0:
+        return 0
+
+    G = cfg.genome_dim
+    births = 0
+
+    # We track which slots have been allocated this call to avoid double-allocation.
+    # Rebuild free list once; remove from it as we allocate.
+    free = list(store.free_slots())
+
+    for parent in idx:
+        if not free:
+            break  # no more capacity; remaining parents skip
+
+        child = free.pop(0)
+
+        # --- child position: parent tile + random offset in [-2, 2], clamped ---
+        offset_y = int(rng.integers(-2, 3))   # integers(lo, hi) is [lo, hi)
+        offset_x = int(rng.integers(-2, 3))
+        cy = int(np.clip(int(store.y[parent]) + offset_y, 0, H - 1))
+        cx = int(np.clip(int(store.x[parent]) + offset_x, 0, W - 1))
+
+        # --- child genome: inherited + gaussian mutation, clipped to [0, 1] ---
+        child_genome = np.clip(
+            store.genome[parent] + rng.normal(0.0, cfg.mutation_sigma, G),
+            0.0, 1.0,
+        ).astype(np.float32)
+
+        # --- populate child slot ---
+        store.alive[child]        = True
+        store.is_predator[child]  = False
+        store.y[child]            = cy
+        store.x[child]            = cx
+        store.energy[child]       = np.float32(0.5)
+        store.hydration[child]    = np.float32(1.0)
+        store.thermal[child]      = np.float32(1.0)
+        store.health[child]       = np.float32(1.0)
+        store.age[child]          = 0
+        store.genome[child]       = child_genome
+        store.lineage_id[child]   = int(store.lineage_id[parent])
+        store.repro_cd[child]     = cfg.repro_cooldown
+        # inventory zeroed (slots are cleared by resolve_deaths, but be explicit)
+        store.inv_food[child]     = np.float32(0.0)
+        store.inv_wood[child]     = np.float32(0.0)
+        store.inv_stone[child]    = np.float32(0.0)
+        store.inv_minerals[child] = np.float32(0.0)
+        store.weapon[child]       = False
+        store.last_signal[child]  = np.int8(0)
+
+        # --- update parent ---
+        store.energy[parent] = np.float32(
+            max(0.0, float(store.energy[parent]) - cfg.repro_energy_cost)
+        )
+        store.repro_cd[parent] = cfg.repro_cooldown
+
+        births += 1
+
+    return births

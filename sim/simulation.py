@@ -165,7 +165,7 @@ class Simulation:
             crop_step, plant, harvest,
             build, store_food, retrieve_food, structure_decay_step, spoil_stored,
         )
-        from .reproduce import resolve_deaths
+        from .reproduce import resolve_deaths, reproduce as _reproduce
         from world.seasons import compute_season_state
 
         cfg   = self.cfg
@@ -181,6 +181,14 @@ class Simulation:
 
         # Mask of living (non-predator) agents; re-used throughout
         living = store.alive & ~store.is_predator
+
+        # Phase 5: decrement reproduction cooldown for all living agents each step.
+        # np maximum so we never go below 0.
+        live_idx_cd = np.flatnonzero(living)
+        if live_idx_cd.size > 0:
+            store.repro_cd[live_idx_cd] = np.maximum(
+                0, store.repro_cd[live_idx_cd] - 1
+            ).astype(np.int32)
 
         # ------------------------------------------------------------------
         # 2. MOVE
@@ -255,6 +263,23 @@ class Simulation:
 
         retrievers = np.flatnonzero(living & (actions.primary == int(Action.RETRIEVE)))
         retrieve_food(store, state, retrievers, cfg)
+
+        # ------------------------------------------------------------------
+        # 4d. REPRODUCE — Phase 5: energy-gated reproduction with cooldown.
+        #     Gate: energy >= repro_energy_threshold AND repro_cd == 0.
+        #     Use a deterministic per-step RNG seeded from self.t so runs are
+        #     reproducible without changing __init__ signature.
+        # ------------------------------------------------------------------
+        repro_candidates = np.flatnonzero(
+            living
+            & (actions.primary == int(Action.REPRODUCE))
+            & (store.energy >= cfg.repro_energy_threshold)
+            & (store.repro_cd == 0)
+        )
+        repro_rng = np.random.default_rng(self.t)
+        births_this_step = _reproduce(
+            store, repro_candidates, cfg, repro_rng, self.H, self.W
+        )
 
         # REST (Action.REST) is already a no-op — nothing to do.
 
@@ -353,6 +378,7 @@ class Simulation:
                 "t":         self.t,
                 "n_agents":  self.store.n_living_agents(),
                 "deaths":    n_deaths,
+                "births":    births_this_step,
                 "foraged":   foraged_total,
                 "harvested": harvested_total,
                 "planted":   planted_total,

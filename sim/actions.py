@@ -152,4 +152,13 @@ def build_mask(world, state, store, cfg: SimConfig) -> np.ndarray:
     has_stored = state.stored_food[ys, xs] > 0.0
     mask[live_idx[on_storage & has_stored], Action.RETRIEVE] = True
 
+    # REPRODUCE (Phase 5): energy >= repro_energy_threshold AND repro_cd == 0
+    # AND at least one free slot exists globally (soft cap check).
+    if store.free_slots().size > 0:
+        can_repro = (
+            (store.energy[live_idx] >= cfg.repro_energy_threshold)
+            & (store.repro_cd[live_idx] == 0)
+        )
+        mask[live_idx[can_repro], Action.REPRODUCE] = True
+
     return mask

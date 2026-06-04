@@ -528,6 +528,11 @@ def test_200_step_smoke_run():
         primary = np.zeros(M, dtype=np.int32)
         for i in range(M):
             valid_actions = np.flatnonzero(mask[i])
+            # Exclude REPRODUCE: this Phase-1 smoke verifies the forage/survive loop.
+            # Under purely RANDOM play, reproduction's energy tax drives a Malthusian
+            # collapse (agents breed to death) — a real Phase-5 dynamic a smart policy
+            # must avoid, not a concern of this survival smoke test.
+            valid_actions = valid_actions[valid_actions != int(Action.REPRODUCE)]
             if valid_actions.size > 0:
                 primary[i] = rng.choice(valid_actions)
             else:
