@@ -164,6 +164,7 @@ class Simulation:
             decay_drives, update_health, forage, eat, drink, regrow_wild, spoil_carried,
             crop_step, plant, harvest,
             build, store_food, retrieve_food, structure_decay_step, spoil_stored,
+            resolve_combat, craft_weapon,
         )
         from .reproduce import resolve_deaths, reproduce as _reproduce
         from world.seasons import compute_season_state
@@ -208,6 +209,25 @@ class Simulation:
             # Agents that would enter ocean stay put
             store.y[movers] = np.where(on_land, new_y, store.y[movers])
             store.x[movers] = np.where(on_land, new_x, store.x[movers])
+
+        # ------------------------------------------------------------------
+        # 2b. ATTACK — Phase 6: deterministic HP combat using PRE-STEP snapshot.
+        #     resolve_combat takes a snapshot internally before applying damage,
+        #     so mutual attacks both land this step (§2.1 ordering).
+        # ------------------------------------------------------------------
+        attackers = np.flatnonzero(living & (actions.primary == int(Action.ATTACK)))
+        combat_result = resolve_combat(store, state, attackers, actions.param, cfg)
+        conflict_slots_this_step = combat_result["conflict_slots"]
+
+        # ------------------------------------------------------------------
+        # 2c. CRAFT — Phase 6: weapon crafting (unarmed + afford check)
+        # ------------------------------------------------------------------
+        crafters = np.flatnonzero(
+            living
+            & (actions.primary == int(Action.CRAFT))
+            & (~store.weapon)
+        )
+        weapons_crafted = craft_weapon(store, crafters, cfg)
 
         # ------------------------------------------------------------------
         # 3. FORAGE — ascending slot order for deterministic conflict resolution
@@ -321,7 +341,7 @@ class Simulation:
             state=state,
             exposure_scale=D,
         )
-        done_mask = resolve_deaths(store)
+        done_mask = resolve_deaths(store, conflict_slots=conflict_slots_this_step)
 
         # ------------------------------------------------------------------
         # 7. Reward (§1.7): comfort-based homeostatic reward
@@ -375,14 +395,16 @@ class Simulation:
             reward=reward,
             done=done_mask,
             info={
-                "t":         self.t,
-                "n_agents":  self.store.n_living_agents(),
-                "deaths":    n_deaths,
-                "births":    births_this_step,
-                "foraged":   foraged_total,
-                "harvested": harvested_total,
-                "planted":   planted_total,
-                "built":     built_total,
+                "t":               self.t,
+                "n_agents":        self.store.n_living_agents(),
+                "deaths":          n_deaths,
+                "births":          births_this_step,
+                "foraged":         foraged_total,
+                "harvested":       harvested_total,
+                "planted":         planted_total,
+                "built":           built_total,
+                "weapons_crafted": weapons_crafted,
+                "attacks":         int(attackers.size),
             },
         )
 

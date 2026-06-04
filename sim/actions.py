@@ -161,4 +161,56 @@ def build_mask(world, state, store, cfg: SimConfig) -> np.ndarray:
         )
         mask[live_idx[can_repro], Action.REPRODUCE] = True
 
+    # ATTACK (Phase 6): enabled when there is at least one living entity (agent or
+    # predator) on an adjacent tile (any of the 8 compass directions).
+    # Build a set of occupied tile coords for fast lookup.
+    living_all = store.alive  # agents AND predators
+    all_live_slots = np.flatnonzero(living_all)
+    if all_live_slots.size > 0:
+        occ_ys = store.y[all_live_slots]
+        occ_xs = store.x[all_live_slots]
+        # Set of (y, x) tuples currently occupied by a living entity
+        occ_set = set(zip(occ_ys.tolist(), occ_xs.tolist()))
+
+        H_world = store.y.max() + 1 if all_live_slots.size > 0 else 1
+        W_world = store.x.max() + 1 if all_live_slots.size > 0 else 1
+
+        for i, slot in enumerate(live_idx):
+            ay = int(store.y[slot])
+            ax = int(store.x[slot])
+            for dy, dx in DIRECTIONS:
+                ny = ay + int(dy)
+                nx = ax + int(dx)
+                if (ny, nx) in occ_set:
+                    mask[slot, Action.ATTACK] = True
+                    break
+
+    # CRAFT (Phase 6): enabled when agent is unarmed AND can afford a weapon.
+    weapon_wood     = cfg.weapon_cost.get("wood",     0.0)
+    weapon_stone    = cfg.weapon_cost.get("stone",    0.0)
+    weapon_minerals = cfg.weapon_cost.get("minerals", 0.0)
+
+    unarmed      = ~store.weapon[live_idx]
+    can_craft    = (
+        unarmed
+        & (store.inv_wood[live_idx]     >= weapon_wood)
+        & (store.inv_stone[live_idx]    >= weapon_stone)
+        & (store.inv_minerals[live_idx] >= weapon_minerals)
+    )
+    mask[live_idx[can_craft], Action.CRAFT] = True
+
+    # BUILD (Phase 6): update affordability check to also include WALL.
+    # (The existing BUILD mask already handles SHELTER/STORAGE; here we extend
+    # the can_afford_any to include wall affordability so BUILD is unmasked if
+    # the agent can only afford a wall.)
+    wall_wood  = cfg.wall_cost.get("wood",  0.0)
+    wall_stone = cfg.wall_cost.get("stone", 0.0)
+    can_afford_wall = (
+        (store.inv_wood[live_idx]  >= wall_wood)
+        & (store.inv_stone[live_idx] >= wall_stone)
+    )
+    # Re-enable BUILD for agents on buildable land that can afford a wall
+    # (the earlier BUILD mask already covered shelter/storage; this adds wall)
+    mask[live_idx[buildable_land & can_afford_wall], Action.BUILD] = True
+
     return mask

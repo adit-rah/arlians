@@ -220,8 +220,9 @@ def forage(
     xs = store.x[idx]
 
     # Material layers (None if world not provided)
-    wood_layer  = world.base_resources["wood"]  if world is not None else None
-    stone_layer = world.base_resources["stone"] if world is not None else None
+    wood_layer     = world.base_resources["wood"]     if world is not None else None
+    stone_layer    = world.base_resources["stone"]    if world is not None else None
+    minerals_layer = world.base_resources["minerals"] if world is not None else None
 
     # Process tile by tile for correct conflict resolution.
     # Group foragers by tile so we apply depletion atomically per tile;
@@ -260,6 +261,17 @@ def forage(
                     gain_s = min(room_s, stone_avail)
                     store.inv_stone[slot] = np.float32(
                         min(float(mat_cap), float(store.inv_stone[slot]) + gain_s)
+                    )
+
+        # --- minerals (abiotic, NOT depleted) ---
+        if minerals_layer is not None:
+            minerals_avail = float(minerals_layer[y, x])
+            if minerals_avail > 0.0:
+                room_m = float(mat_cap) - float(store.inv_minerals[slot])
+                if room_m > 0.0:
+                    gain_m = min(room_m, minerals_avail)
+                    store.inv_minerals[slot] = np.float32(
+                        min(float(mat_cap), float(store.inv_minerals[slot]) + gain_m)
                     )
 
 
@@ -502,7 +514,7 @@ def build(
 
     For each agent (ascending slot order for determinism):
       - Tile must have structure_type == 0 (no existing structure).
-      - `param[slot]` selects the structure type (1=SHELTER, 2=STORAGE; 3=WALL skipped).
+      - `param[slot]` selects the structure type (1=SHELTER, 2=STORAGE, 3=WALL).
       - Agent must carry enough material (wood/stone) per the cost dict.
       - On success: deduct cost, set structure_type and structure_hp=structure_init_hp.
 
@@ -514,7 +526,7 @@ def build(
     cost_map = {
         1: cfg.shelter_cost,   # SHELTER
         2: cfg.storage_cost,   # STORAGE
-        # 3: cfg.wall_cost     # WALL — skip in Phase 4
+        3: cfg.wall_cost,      # WALL — enabled in Phase 6
     }
 
     built = 0
@@ -667,3 +679,163 @@ def spoil_stored(state: WorldState, cfg: SimConfig) -> None:
     state.stored_food[has_food] = np.maximum(
         state.stored_food[has_food] - cfg.spoilage_stored, 0.0
     ).astype(np.float32)
+
+
+# ---------------------------------------------------------------------------
+# Phase 6 combat: resolve_combat and craft_weapon
+# ---------------------------------------------------------------------------
+
+def resolve_combat(
+    store: EntityStore,
+    state: WorldState,
+    attacker_idx: np.ndarray,
+    param: np.ndarray,
+    cfg: SimConfig,
+) -> dict:
+    """
+    Execute ATTACK for agents in `attacker_idx` (chose ATTACK, living).
+
+    Uses a PRE-STEP SNAPSHOT of positions and HP so that simultaneous/mutual
+    attacks both land (if A and B attack each other, both take damage this step).
+
+    For each attacker:
+      - target_tile = attacker (y, x) + DIRECTIONS[param[slot]], clamped to bounds.
+      - Find ALL living entities (agents or predators) on that tile.
+      - Compute damage per attacker:
+          dmg = attack_damage
+                * (weapon_attack_mult if attacker has weapon else 1.0)
+                * (wall_defense_mult if target tile has WALL else 1.0)
+                * group_mult
+        where group_mult = max(group_defense_floor,
+                               group_defense_per_ally ** n_other_living_on_target)
+        "n_other_living_on_target" = all living entities on target tile minus the
+        one we're computing damage against (i.e., co-located allies protect each target).
+      - Accumulate damage per target slot (multiple attackers stack).
+      - Apply accumulated damage AFTER all attackers are evaluated (atomic step).
+
+    Returns a dict: {"conflict_slots": set_of_slot_indices_that_took_combat_damage}
+    This is used by resolve_deaths to attribute "conflict" cause of death.
+
+    Design note: predator attackers reuse this function — they simply have weapon=False.
+    """
+    from .actions import DIRECTIONS, StructureType
+
+    if attacker_idx.size == 0:
+        return {"conflict_slots": set()}
+
+    H, W = state.structure_type.shape
+
+    # --- PRE-STEP SNAPSHOT ---
+    # Take snapshot of positions and living status BEFORE applying any damage.
+    snap_alive = store.alive.copy()
+    snap_y     = store.y.copy()
+    snap_x     = store.x.copy()
+
+    # Build a fast tile -> [slot] lookup using snapshot positions
+    # Only include living entities (agents + predators) in the lookup
+    live_mask = snap_alive
+    live_slots = np.flatnonzero(live_mask)
+
+    # Map (y, x) -> list of living slots on that tile
+    from collections import defaultdict
+    tile_to_slots: dict = defaultdict(list)
+    for slot in live_slots:
+        tile_to_slots[(int(snap_y[slot]), int(snap_x[slot]))].append(slot)
+
+    # Accumulate damage per target slot
+    damage_accum: dict[int, float] = {}
+
+    for atk in attacker_idx:
+        if not snap_alive[atk]:
+            continue  # attacker died earlier this step (shouldn't happen, but guard)
+
+        # Compute target tile
+        dir_idx = int(param[atk]) % len(DIRECTIONS)
+        dy, dx  = DIRECTIONS[dir_idx]
+        ty = int(np.clip(int(snap_y[atk]) + dy, 0, H - 1))
+        tx = int(np.clip(int(snap_x[atk]) + dx, 0, W - 1))
+
+        # Targets: all living entities on the target tile
+        targets_on_tile = tile_to_slots.get((ty, tx), [])
+        if not targets_on_tile:
+            continue
+
+        # Is the target tile a WALL?
+        target_on_wall = int(state.structure_type[ty, tx]) == int(StructureType.WALL)
+        wall_mult = float(cfg.wall_defense_mult) if target_on_wall else 1.0
+
+        # Weapon multiplier for attacker
+        weapon_mult = float(cfg.weapon_attack_mult) if bool(store.weapon[atk]) else 1.0
+
+        # Group defense: n_other = number of OTHER living entities co-located with each
+        # specific target. For each target individually, it's len(targets_on_tile) - 1.
+        n_others = len(targets_on_tile) - 1
+        group_mult = max(
+            float(cfg.group_defense_floor),
+            float(cfg.group_defense_per_ally) ** n_others,
+        )
+
+        base_dmg = (
+            float(cfg.attack_damage)
+            * weapon_mult
+            * wall_mult
+            * group_mult
+        )
+
+        for tgt in targets_on_tile:
+            damage_accum[tgt] = damage_accum.get(tgt, 0.0) + base_dmg
+
+    # --- Apply accumulated damage ---
+    conflict_slots: set = set()
+    for tgt_slot, dmg in damage_accum.items():
+        if not store.alive[tgt_slot]:
+            continue  # target already dead (can't happen in Phase 6 but guard anyway)
+        store.health[tgt_slot] = np.float32(
+            max(0.0, float(store.health[tgt_slot]) - dmg)
+        )
+        conflict_slots.add(tgt_slot)
+
+    return {"conflict_slots": conflict_slots}
+
+
+def craft_weapon(
+    store: EntityStore,
+    idx: np.ndarray,
+    cfg: SimConfig,
+) -> int:
+    """
+    Execute CRAFT (weapon) for agents in `idx` (chose CRAFT, living, unarmed).
+
+    For each agent:
+      - Must not already have a weapon (store.weapon[slot] == False).
+      - Must carry enough inv_wood, inv_stone, inv_minerals per cfg.weapon_cost.
+      - On success: deduct cost from inventory, set weapon=True.
+
+    Returns the count of weapons crafted this step.
+    """
+    if idx.size == 0:
+        return 0
+
+    wood_cost     = float(cfg.weapon_cost.get("wood",     0.0))
+    stone_cost    = float(cfg.weapon_cost.get("stone",    0.0))
+    minerals_cost = float(cfg.weapon_cost.get("minerals", 0.0))
+
+    crafted = 0
+    for slot in idx:
+        if bool(store.weapon[slot]):
+            continue  # already armed — no-op
+        if float(store.inv_wood[slot])     < wood_cost:
+            continue
+        if float(store.inv_stone[slot])    < stone_cost:
+            continue
+        if float(store.inv_minerals[slot]) < minerals_cost:
+            continue
+
+        # Deduct cost and arm the agent
+        store.inv_wood[slot]     = np.float32(float(store.inv_wood[slot])     - wood_cost)
+        store.inv_stone[slot]    = np.float32(float(store.inv_stone[slot])    - stone_cost)
+        store.inv_minerals[slot] = np.float32(float(store.inv_minerals[slot]) - minerals_cost)
+        store.weapon[slot]       = True
+        crafted += 1
+
+    return crafted

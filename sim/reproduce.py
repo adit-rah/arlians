@@ -59,6 +59,7 @@ def traits_from_genome(genome: np.ndarray) -> BodyTraits:
 def resolve_deaths(
     store: EntityStore,
     metrics_deaths: Optional[dict] = None,
+    conflict_slots: Optional[set] = None,
 ) -> np.ndarray:
     """
     Kill any living agent whose health <= 0 and mark their slot as dead.
@@ -66,6 +67,7 @@ def resolve_deaths(
     Steps:
       1. Find slots where alive=True and health <= 0.
       2. Attribute cause of death (BEFORE zeroing drives):
+           conflict_slots set contains slot -> "conflict" (agent-inflicted combat)
            hydration <= 0 -> "dehydrate"
            energy <= 0 (and hydration > 0) -> "starve"
            thermal <= 0 (and energy > 0 and hydration > 0) -> "exposure"
@@ -77,7 +79,11 @@ def resolve_deaths(
     The mask is also used as the `done` signal for the step output.
 
     If `metrics_deaths` is a dict it receives increments to "starve", "dehydrate",
-    and/or "exposure" matching each dead agent's attributed cause.
+    "exposure", and/or "conflict" matching each dead agent's attributed cause.
+
+    `conflict_slots` (optional): set of slot indices that took agent-inflicted combat
+    damage this step (from resolve_combat). Agents in this set that die this step are
+    attributed "conflict" cause. If None, no conflict attribution occurs.
     """
     died_mask: np.ndarray = store.alive & (store.health <= 0.0)
 
@@ -88,19 +94,21 @@ def resolve_deaths(
 
     # --- attribute cause of death BEFORE zeroing drives ---
     if metrics_deaths is not None:
-        # Priority: hydration <= 0 -> dehydrate
-        #           else energy <= 0 -> starve
-        #           else thermal <= 0 -> exposure
-        #           else -> starve (generic health drain)
-        dehydrate_mask = store.hydration[idx] <= 0.0
-        starve_mask    = (~dehydrate_mask) & (store.energy[idx] <= 0.0)
-        exposure_mask  = (~dehydrate_mask) & (~starve_mask) & (store.thermal[idx] <= 0.0)
-        other_mask     = (~dehydrate_mask) & (~starve_mask) & (~exposure_mask)
+        # Priority: conflict -> dehydrate -> starve -> exposure -> starve(other)
+        conflict_set = conflict_slots if conflict_slots is not None else set()
 
+        conflict_mask  = np.array([int(s) in conflict_set for s in idx], dtype=bool)
+        dehydrate_mask = (~conflict_mask) & (store.hydration[idx] <= 0.0)
+        starve_mask    = (~conflict_mask) & (~dehydrate_mask) & (store.energy[idx] <= 0.0)
+        exposure_mask  = (~conflict_mask) & (~dehydrate_mask) & (~starve_mask) & (store.thermal[idx] <= 0.0)
+        other_mask     = (~conflict_mask) & (~dehydrate_mask) & (~starve_mask) & (~exposure_mask)
+
+        n_conflict  = int(conflict_mask.sum())
         n_dehydrate = int(dehydrate_mask.sum())
         n_starve    = int(starve_mask.sum()) + int(other_mask.sum())
         n_exposure  = int(exposure_mask.sum())
 
+        metrics_deaths["conflict"]  = metrics_deaths.get("conflict",  0) + n_conflict
         metrics_deaths["dehydrate"] = metrics_deaths.get("dehydrate", 0) + n_dehydrate
         metrics_deaths["starve"]    = metrics_deaths.get("starve",    0) + n_starve
         metrics_deaths["exposure"]  = metrics_deaths.get("exposure",  0) + n_exposure
