@@ -90,6 +90,12 @@ class SimConfig:
     # ----- signaling -----
     n_symbols: int = 8                  # emit() vocabulary size (3-bit channel)
 
+    # ----- catastrophes (phase 7) -----
+    catastrophe_prob: float = 0.01      # per-step probability a new catastrophe begins
+    catastrophe_duration: int = 15      # days an event stays active
+    catastrophe_radius: int = 20        # affected-region radius (tiles)
+    catastrophe_magnitude: float = 0.5  # severity multiplier (event_mask value in region)
+
     # ----- reward (evolution-only: purely individual homeostasis + survival) -----
     w_h: float = 1.0                    # weight on homeostatic comfort term
     w_a: float = 0.05                   # per-step alive bonus
