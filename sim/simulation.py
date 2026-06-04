@@ -167,6 +167,7 @@ class Simulation:
             resolve_combat, craft_weapon,
         )
         from .reproduce import resolve_deaths, reproduce as _reproduce
+        from .threats import update_scent, spawn_predators, step_predators
         from world.seasons import compute_season_state
 
         cfg   = self.cfg
@@ -314,6 +315,22 @@ class Simulation:
         spoil_stored(state, cfg)
 
         # ------------------------------------------------------------------
+        # 5b. Predator phase (Phase 6 §2.7 / build-spec §2.1 step 7):
+        #   a. update_scent: deposit fresh scent at each living agent's tile.
+        #   b. spawn_predators: maintain target count = pred_per_agents * n_living.
+        #   c. step_predators: move + attack; returns slots that took predator damage.
+        # Use a deterministic per-step RNG seeded from self.t (independent from
+        # the reproduction RNG so they don't interfere).
+        # ------------------------------------------------------------------
+        pred_rng = np.random.default_rng(self.t + 1_000_000)
+        update_scent(state, store)
+        target_pred = round(cfg.pred_per_agents * store.n_living_agents())
+        spawn_predators(store, world, target_pred, pred_rng)
+        pred_result = step_predators(store, state, world, cfg, pred_rng)
+        predator_slots_this_step = pred_result["predator_slots"]
+        n_predators_now = int((store.alive & store.is_predator).sum())
+
+        # ------------------------------------------------------------------
         # 6. Drive decay + health update + death resolution
         #    Phase 4: pass thermal parameters so decay_drives/update_health
         #             update thermal and apply exposure damage.
@@ -341,7 +358,11 @@ class Simulation:
             state=state,
             exposure_scale=D,
         )
-        done_mask = resolve_deaths(store, conflict_slots=conflict_slots_this_step)
+        done_mask = resolve_deaths(
+            store,
+            conflict_slots=conflict_slots_this_step,
+            predator_slots=predator_slots_this_step,
+        )
 
         # ------------------------------------------------------------------
         # 7. Reward (§1.7): comfort-based homeostatic reward
@@ -397,6 +418,7 @@ class Simulation:
             info={
                 "t":               self.t,
                 "n_agents":        self.store.n_living_agents(),
+                "n_predators":     n_predators_now,
                 "deaths":          n_deaths,
                 "births":          births_this_step,
                 "foraged":         foraged_total,

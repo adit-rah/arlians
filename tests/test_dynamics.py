@@ -514,6 +514,9 @@ def test_200_step_smoke_run():
         forage_regen=0.05,
         eat_restore=0.9,
         spoilage_carried=0.0,
+        # disable predators: this smoke test targets Phase-1 forage/survive dynamics;
+        # predator pressure from Phase 6 would kill random-acting agents too quickly.
+        pred_per_agents=0.0,
     )
     sim = Simulation(world, cfg)
     sim.reset(seed=7)
