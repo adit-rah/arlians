@@ -62,6 +62,9 @@ and per-phase `test_phaseN_gate.py` files.
 # 3. see an UNTRAINED policy in action (random weights) -> animated gif + metrics
 .venv/bin/python scripts/demo.py
 
+# 3b. live delta stream (browser) — see stream/README.md
+# WORLD_DIR=./data/world_42 uvicorn stream.server.app:app --port 8000
+
 # 4. reduced-scale training smoke (CPU/MPS) -> PPO runs, loss moves
 .venv/bin/python train/run.py
 ```
