@@ -41,8 +41,14 @@ def main():
     ap.add_argument("--size", type=int, default=160)
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--out", type=str, default="data/demo.gif")
-    ap.add_argument("--render-every", type=int, default=3)
+    ap.add_argument("--render-every", type=int, default=1,
+                    help="render every Nth sim step (1 = every step; agents move <=1 "
+                         "tile/step so >1 makes motion look jumpy)")
     ap.add_argument("--upscale", type=int, default=3)
+    ap.add_argument("--no-respawn", action="store_true",
+                    help="don't top the population back up when agents die. Without this, "
+                         "dead slots are re-seeded at RANDOM tiles, which looks like agents "
+                         "teleporting. With it, you watch a real cohort move and thin out.")
     ap.add_argument("--checkpoint", type=str, default=None,
                     help="load trained policy weights from a .pt checkpoint; "
                          "omit for random (untrained) weights")
@@ -71,6 +77,8 @@ def main():
     policy.eval()
     print(f"[demo] {tag} ArlianPolicy on {DEVICE} "
           f"({sum(p.numel() for p in policy.parameters()):,} params)")
+    print(f"[demo] respawn={'off (real cohort)' if args.no_respawn else 'on (slots re-seeded at random tiles)'}"
+          f"  render_every={args.render_every}")
 
     log = MetricsLogger()
     frames = []
@@ -84,7 +92,10 @@ def main():
             emit=act["emit"].cpu().numpy().astype(np.int32),
         )
         out = sim.step(actions)
-        sim.respawn_dead(seed=t)          # keep the world populated (Phase 1-4 crutch)
+        if not args.no_respawn:
+            sim.respawn_dead(seed=t)      # keep the world populated (Phase 1-4 crutch);
+                                          # re-seeds dead slots at RANDOM tiles (looks like
+                                          # teleporting). Pass --no-respawn for a real cohort.
         log.record_step(sim, out.info, actions)
         if t % args.render_every == 0:
             fr = render_frame(world, sim.state, sim.store)
