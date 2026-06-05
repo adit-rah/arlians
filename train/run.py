@@ -48,7 +48,12 @@ def main() -> None:
     ap.add_argument("--updates", type=int, default=50, help="number of PPO updates")
     ap.add_argument("--horizon", type=int, default=64, help="T: steps per rollout")
     ap.add_argument("--no-respawn", action="store_true",
-                    help="disable respawn_dead (use at Phase 5+ so reproduction sustains pop)")
+                    help="disable respawn_dead (survival-sim / Phase 5+: let the cohort "
+                         "decline naturally instead of topping it up every step)")
+    ap.add_argument("--reset-floor", type=int, default=None,
+                    help="survival-sim mode: re-seed a fresh cohort when living pop drops "
+                         "below this floor (only with --no-respawn). Defaults to "
+                         "init_agents//4 when --no-respawn is set; 0 disables.")
     # checkpointing / logging
     ap.add_argument("--checkpoint", type=str, default=None, help="checkpoint path (.pt)")
     ap.add_argument("--checkpoint-every", type=int, default=10)
@@ -57,8 +62,17 @@ def main() -> None:
     args = ap.parse_args()
 
     H = args.height or args.width
+
+    # Survival-sim floor: default to a quarter of the starting cohort when respawn is
+    # off, so a collapsed cohort is re-seeded and training never stalls at zero agents.
+    if args.reset_floor is None:
+        reset_floor = max(1, args.init_agents // 4) if args.no_respawn else 0
+    else:
+        reset_floor = args.reset_floor
+
     print(f"[run] device={DEVICE}  world={args.width}x{H}  agents={args.agents}"
-          f"  updates={args.updates}  T={args.horizon}")
+          f"  updates={args.updates}  T={args.horizon}"
+          f"  respawn={not args.no_respawn}  reset_floor={reset_floor}")
 
     world = World.generate(WorldConfig(width=args.width, height=H, seed=args.seed))
     sim_cfg = SimConfig(max_agents=args.agents, init_agents=args.init_agents)
@@ -81,6 +95,19 @@ def main() -> None:
             f"({el:.0f}s, {(u + 1) / max(el, 1e-9):.2f} upd/s)",
             flush=True,
         )
+        b = row.get("behavior")
+        if b:
+            top = sorted(b["action_frac"].items(), key=lambda kv: -kv[1])[:5]
+            top_str = " ".join(f"{k}={v:.2f}" for k, v in top)
+            print(
+                f"         behavior  farmed={b['pct_farmed']:.3f}  "
+                f"fertile_occ={b['fertile_occ']:.3f}  water_occ={b['water_occ']:.3f}  "
+                f"E/H/T={b['mean_energy']:.2f}/{b['mean_hydration']:.2f}/{b['mean_thermal']:.2f}  "
+                f"age(mean/max)={b['mean_age']:.0f}/{b['max_age']}  "
+                f"births={b['births']}  deaths={b['deaths_total']}\n"
+                f"         actions   {top_str}",
+                flush=True,
+            )
         if log_file:
             log_file.write(json.dumps(row) + "\n"); log_file.flush()
 
@@ -89,6 +116,7 @@ def main() -> None:
         sim, policy,
         n_updates=args.updates, T=args.horizon,
         use_respawn=not args.no_respawn,
+        reset_floor=reset_floor,
         checkpoint_path=args.checkpoint,
         checkpoint_every=args.checkpoint_every,
         resume=args.resume,

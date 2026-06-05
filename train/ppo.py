@@ -25,11 +25,82 @@ import numpy as np
 import torch
 import torch.optim as optim
 
-from sim.actions import build_mask
+from sim.actions import build_mask, Action, N_PRIMARY
 from sim.simulation import Simulation, Actions
 from .policy import ArlianPolicy, DEVICE
 from .rollout import SlotRolloutBuffer
 from sim.observe import vector_len as compute_vector_len
+
+
+class RolloutStats:
+    """Cheap, fully-vectorized behavioral telemetry accumulated over a rollout.
+
+    The mean-reward curve saturates once agents learn basic homeostasis and tells
+    you nothing about *what* they do. This records the diagnostic signals — action
+    mix, calorie source, settlement occupancy, births/deaths, lifespan — without the
+    per-agent Python loops in MetricsLogger (which are too slow for the training hot
+    loop). Call `record()` once per step; read `summary()` at the end of the rollout.
+    """
+
+    def __init__(self, sim: Simulation):
+        self.fert  = sim.world.base_resources["soil_fertility"]
+        self.water = sim.world.base_resources["water_proximity"]
+        self.n_action = np.zeros(N_PRIMARY, dtype=np.int64)
+        self.foraged = self.harvested = 0.0
+        self.births = 0
+        self.deaths: Dict[str, int] = {}
+        self.on_fertile = self.on_water = 0
+        self.agentsteps = 0
+        self.energy_sum = self.hyd_sum = self.thermal_sum = self.age_sum = 0.0
+        self.max_age = 0
+        self.pop_sum = 0
+        self.pop_steps = 0
+
+    def record(self, sim: Simulation, actions: Actions, info: Dict[str, Any]) -> None:
+        store = sim.store
+        living = store.alive & ~store.is_predator
+        idx = np.flatnonzero(living)
+        n = idx.size
+        self.pop_sum += n
+        self.pop_steps += 1
+        if n:
+            self.n_action += np.bincount(actions.primary[idx], minlength=N_PRIMARY)
+            ys, xs = store.y[idx], store.x[idx]
+            self.on_fertile += int((self.fert[ys, xs]  >= 0.6).sum())
+            self.on_water   += int((self.water[ys, xs] >= 0.6).sum())
+            self.agentsteps += n
+            self.energy_sum  += float(store.energy[idx].sum())
+            self.hyd_sum     += float(store.hydration[idx].sum())
+            self.thermal_sum += float(store.thermal[idx].sum())
+            self.age_sum     += float(store.age[idx].sum())
+            self.max_age = max(self.max_age, int(store.age[idx].max()))
+        self.foraged   += float(info.get("foraged", 0.0))
+        self.harvested += float(info.get("harvested", 0.0))
+        self.births    += int(info.get("births", 0))
+        for cause, k in info.get("deaths_by_cause", {}).items():
+            self.deaths[cause] = self.deaths.get(cause, 0) + int(k)
+
+    def summary(self) -> Dict[str, Any]:
+        a = self.agentsteps or 1
+        tot_food = self.foraged + self.harvested
+        af = self.n_action / max(1, self.n_action.sum())
+        return {
+            "pct_farmed":     float(self.harvested / tot_food) if tot_food > 0 else 0.0,
+            "fertile_occ":    self.on_fertile / a,
+            "water_occ":      self.on_water / a,
+            "mean_energy":    self.energy_sum / a,
+            "mean_hydration": self.hyd_sum / a,
+            "mean_thermal":   self.thermal_sum / a,
+            "mean_age":       self.age_sum / a,
+            "max_age":        self.max_age,
+            "births":         self.births,
+            "deaths_total":   int(sum(self.deaths.values())),
+            "deaths":         dict(self.deaths),
+            "pop_mean":       self.pop_sum / max(1, self.pop_steps),
+            "action_frac":    {Action(i).name: round(float(af[i]), 3)
+                               for i in range(N_PRIMARY) if af[i] > 0.005},
+        }
+
 
 # ---- Hyperparameters (§3.2) ----
 CLIP_EPS   = 0.2
@@ -48,6 +119,7 @@ def collect(
     T: int,
     seed_offset: int = 0,
     use_respawn: bool = True,
+    stats: "RolloutStats | None" = None,
 ) -> SlotRolloutBuffer:
     """
     Roll out T environment steps, storing all (s, a, r, done, valid) in a buffer.
@@ -86,6 +158,10 @@ def collect(
 
         # Step environment
         step_out = sim.step(actions)
+
+        # Behavioral telemetry BEFORE respawn (so deaths/lifespan reflect reality)
+        if stats is not None:
+            stats.record(sim, actions, step_out.info)
 
         # Store transition
         # alive_mask BEFORE step (the obs we acted on)
@@ -238,6 +314,7 @@ def train(
     T: int,
     *,
     use_respawn: bool = True,
+    reset_floor: int = 0,
     checkpoint_path: str | None = None,
     checkpoint_every: int = 10,
     resume: bool = False,
@@ -253,7 +330,14 @@ def train(
     Args:
         sim, policy, n_updates, T: as before.
         use_respawn:     pass-through to collect() — keep True for Phases 1-4, set
-                         False at Phase 5+ to let reproduction sustain the population.
+                         False at Phase 5+ (or survival-sim mode) so the population is
+                         not artificially topped up and lifespan reflects real skill.
+        reset_floor:     survival-sim mode. When > 0 (and use_respawn is False), the
+                         cohort is left to decline naturally during a rollout; if the
+                         living population drops below this floor at a rollout boundary,
+                         a fresh cohort is re-seeded. This keeps training alive without
+                         the respawn crutch, so mean/max lifespan becomes the signal
+                         that rises as the policy learns to survive. 0 disables it.
         checkpoint_path: if set, save a resumable checkpoint here every
                          checkpoint_every updates and at the end (survives Kaggle/Colab
                          disconnects).
@@ -276,11 +360,26 @@ def train(
         _ = sim.reset(seed=0)
 
     for update_i in range(start_update, n_updates):
+        # Survival-sim mode: re-seed a fresh cohort if the population has collapsed
+        # below the floor (replaces the respawn crutch). Checked at the rollout
+        # boundary so GAE/done-masking inside a rollout stays clean.
+        if reset_floor > 0 and not use_respawn:
+            n_now = int(sim.store.n_living_agents())
+            if n_now < reset_floor:
+                _ = sim.reset(seed=1_000_000 + update_i)
+                print(
+                    f"[train] cohort collapsed ({n_now} < floor {reset_floor}); "
+                    f"re-seeded fresh cohort at update {update_i}",
+                    flush=True,
+                )
+
         print(
             f"[train] {update_i + 1}/{n_updates} collecting rollout ({T} steps)...",
             flush=True,
         )
-        buffer = collect(sim, policy, T, seed_offset=update_i * T, use_respawn=use_respawn)
+        stats = RolloutStats(sim)
+        buffer = collect(sim, policy, T, seed_offset=update_i * T,
+                         use_respawn=use_respawn, stats=stats)
 
         # Mean reward across valid (alive) timesteps
         valid_rewards = buffer.reward[buffer.valid_mask]
@@ -301,6 +400,7 @@ def train(
             "mean_return":  mean_return,
             "n_living":     n_living,
             **loss_dict,
+            "behavior":     stats.summary(),
         }
         metrics_history.append(row)
         if log_fn is not None:
