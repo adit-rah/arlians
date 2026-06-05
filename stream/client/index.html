@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Arlians Live</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: system-ui, sans-serif;
+      background: #111;
+      color: #eee;
+      display: flex;
+      flex-direction: column;
+      min-height: 100vh;
+    }
+    header {
+      padding: 0.75rem 1rem;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.75rem;
+      align-items: center;
+      border-bottom: 1px solid #333;
+    }
+    #hud { flex: 1; font-variant-numeric: tabular-nums; }
+    #status { color: #8af; font-size: 0.9rem; }
+    button {
+      background: #2a2a2a;
+      color: #eee;
+      border: 1px solid #444;
+      padding: 0.35rem 0.75rem;
+      border-radius: 4px;
+      cursor: pointer;
+    }
+    button:hover { background: #383838; }
+    main {
+      flex: 1;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      padding: 1rem;
+      overflow: auto;
+    }
+    canvas {
+      image-rendering: pixelated;
+      border: 1px solid #333;
+      max-width: 100%;
+      max-height: calc(100vh - 120px);
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <strong>Arlians</strong>
+    <span id="hud">—</span>
+    <span id="status">Starting…</span>
+    <button type="button" id="pause">Pause</button>
+    <button type="button" id="play">Play</button>
+    <button type="button" id="reset">Reset</button>
+  </header>
+  <main>
+    <canvas id="world" width="512" height="512"></canvas>
+  </main>
+  <script type="module" src="/static/app.js"></script>
+</body>
+</html>
