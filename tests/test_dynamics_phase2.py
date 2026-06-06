@@ -5,8 +5,8 @@ Covers (per spec):
   1. Hydration decays by ~hydration_decay per step at neutral genome water_need=1.0.
   2. DRINK on a high-water tile restores hydration; DRINK on a dry tile does not
      and is masked.
-  3. An agent that never drinks dies of dehydration FIRST (hydration_decay=0.10 >
-     energy_decay=0.05); attributed cause is "dehydrate".
+  3. An agent that never drinks dies of dehydration FIRST (hydration_decay=0.06 >
+     energy_decay=0.04); attributed cause is "dehydrate".
   4. update_health: agent with full energy but zero hydration takes damage, not regen.
   5. build_mask: DRINK enabled only on watered tiles.
   6. 200-step scripted run keeps >0 agents alive on a 128x128 world.
@@ -90,7 +90,7 @@ def test_hydration_decays_by_hydration_decay_per_step():
 
 
 def test_hydration_decays_faster_than_energy():
-    """hydration_decay (0.10) > energy_decay (0.05): hydration falls faster."""
+    """hydration_decay (0.06) > energy_decay (0.04): hydration falls faster."""
     cfg   = _make_cfg()
     store = _single_agent_store(cfg, energy=1.0, hydration=1.0)
 

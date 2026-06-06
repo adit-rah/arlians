@@ -26,8 +26,8 @@ class SimConfig:
     init_agents: int = 256          # agents seeded at spawn-eligible tiles on reset
 
     # ----- drives (per-step, at genome-neutral body) -----
-    energy_decay: float = 0.05      # ~20 days to starve from full
-    hydration_decay: float = 0.10   # ~10 days to dehydrate from full
+    energy_decay: float = 0.04      # ~25 days to starve from full
+    hydration_decay: float = 0.06   # ~17 days to dehydrate from full
     thermal_target_temp: float = 0.45   # effective temp at/above this -> thermal recovers
     thermal_decay: float = 0.08     # thermal lost/step when cold & unsheltered (×curriculum D)
     thermal_warm_regen: float = 0.05    # thermal gained/step when warm enough
