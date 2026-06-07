@@ -187,6 +187,14 @@ def collect(
         # Advance obs
         obs = step_out.obs
 
+        # Survival-sim early-break: once the whole cohort is dead (and we are NOT
+        # topping the population back up), the rest of the horizon is an empty
+        # world producing zero valid transitions — stop and save the compute.
+        # compute_gae stays correct: the unfilled trailing steps keep
+        # valid_mask=False and each slot's GAE already reset at its death boundary.
+        if not use_respawn and sim.store.n_living_agents() == 0:
+            break
+
     # ---- Bootstrap value at horizon end ----
     # For alive slots at the end: V(s_T). Dead slots: 0.
     prim_mask_final = build_mask(sim.world, sim.state, sim.store, cfg)

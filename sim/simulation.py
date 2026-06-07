@@ -402,10 +402,18 @@ class Simulation:
 
         # ------------------------------------------------------------------
         # 7. Reward (§1.7): comfort-based homeostatic reward
-        #    comfort = (energy + hydration + thermal) / 3
+        #    comfort = cbrt(energy * hydration * thermal)   (geometric mean)
         #    r = cfg.w_h * comfort + cfg.w_a   for living agents (including
         #        the just-died ones who get their final-step reward before done)
         #    r = 0 for slots that were already dead before this step
+        #
+        #    Geometric mean (Liebig's law of the minimum): comfort is capped by the
+        #    WEAKEST drive, so a full hydration meter can't paper over a starving
+        #    energy level. This kills the over-drinking local optimum that an
+        #    averaged comfort permits (max the cheap drive, ignore the expensive
+        #    one). Still purely homeostatic: a function of the three drives only.
+        #    Range is identical to the average: [0, 1], and =1 only when all drives
+        #    are full, so r stays in (w_a, w_h + w_a].
         # ------------------------------------------------------------------
         M = cfg.max_agents
         reward = np.zeros(M, dtype=np.float32)
@@ -431,11 +439,11 @@ class Simulation:
         # (i.e., was alive at the start of this step).
         reward_idx = np.flatnonzero(was_active | done_mask)
         if reward_idx.size > 0:
-            comfort = (
+            comfort = np.cbrt(
                 store.energy[reward_idx]
-                + store.hydration[reward_idx]
-                + store.thermal[reward_idx]
-            ) / 3.0
+                * store.hydration[reward_idx]
+                * store.thermal[reward_idx]
+            )
             reward[reward_idx] = (cfg.w_h * comfort + cfg.w_a).astype(np.float32)
 
         # Slots that are dead and NOT in done_mask (already dead before this step)
