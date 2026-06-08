@@ -98,9 +98,10 @@ class SimConfig:
     catastrophe_radius: int = 20        # affected-region radius (tiles)
     catastrophe_magnitude: float = 0.5  # severity multiplier (event_mask value in region)
 
-    # ----- reward (evolution-only: purely individual homeostasis + survival) -----
+    # ----- reward (individual fitness: homeostasis + survival + reproduction) -----
     w_h: float = 1.0                    # weight on homeostatic comfort term
     w_a: float = 0.05                   # per-step alive bonus
+    w_r: float = 0.6                    # bonus to parent per successful birth (fitness term)
 
     # ----- curriculum -----
     D_init: float = 0.3                 # initial difficulty scalar in [0,1]

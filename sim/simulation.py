@@ -306,6 +306,11 @@ class Simulation:
         births_this_step = _reproduce(
             store, repro_candidates, cfg, repro_rng, self.H, self.W
         )
+        # _reproduce processes repro_candidates in ascending order, allocating one
+        # child per parent until entity-slot capacity is exhausted
+        # (reproduce.py:207-209), so the first `births_this_step` candidates are
+        # exactly the successful parents — used for the reproduction reward (step 7).
+        reproduced_slots = repro_candidates[:births_this_step]
 
         # REST (Action.REST) is already a no-op — nothing to do.
 
@@ -401,10 +406,11 @@ class Simulation:
         )
 
         # ------------------------------------------------------------------
-        # 7. Reward (§1.7): comfort-based homeostatic reward
+        # 7. Reward (§1.7): individual-fitness reward = homeostasis + reproduction
         #    comfort = cbrt(energy * hydration * thermal)   (geometric mean)
         #    r = cfg.w_h * comfort + cfg.w_a   for living agents (including
         #        the just-died ones who get their final-step reward before done)
+        #      + cfg.w_r for each agent that successfully reproduced this step
         #    r = 0 for slots that were already dead before this step
         #
         #    Geometric mean (Liebig's law of the minimum): comfort is capped by the
@@ -445,6 +451,13 @@ class Simulation:
                 * store.thermal[reward_idx]
             )
             reward[reward_idx] = (cfg.w_h * comfort + cfg.w_a).astype(np.float32)
+
+        # Reproduction bonus: pay the parent for each successful birth (fitness term).
+        # reproduced_slots are a subset of the living agents already rewarded above;
+        # this adds w_r on top. Parents that reproduced then died this step are in
+        # done_mask and still receive it as their final-step reward.
+        if reproduced_slots.size > 0:
+            reward[reproduced_slots] += np.float32(cfg.w_r)
 
         # Slots that are dead and NOT in done_mask (already dead before this step)
         # keep reward=0 (set at initialization above).
