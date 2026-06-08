@@ -52,7 +52,7 @@ class SimConfig:
     spoilage_stored: float = 0.002  # food lost/step in a storage structure
 
     # ----- crops -----
-    crop_base_growth: float = 0.02      # stage/step at fert=water=season=1 (~50d on prime tile)
+    crop_base_growth: float = 0.035     # stage/step at fert=water=season=1 (~29d on prime tile)
     crop_yield: float = 1.2             # food at full maturity (must beat forage_yield)
     crop_min_fertility: float = 0.15    # eff_fert below this -> crop rots
     crop_rot: float = 0.05              # crop_health lost/step under rot conditions

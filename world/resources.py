@@ -66,8 +66,12 @@ def _sparsify_wild_food(wild_food: np.ndarray, rng: np.random.Generator) -> np.n
     require travel, encouraging farmers to stay put.
     """
     H, W = wild_food.shape
-    # Sparse noise: exponential distribution remapped to [0,1]
-    sparse = rng.exponential(scale=0.12, size=(H, W)).astype(np.float32)
+    # Sparse noise: exponential distribution remapped to [0,1].
+    # scale controls how much wild food survives: at 0.12 nearly every tile was
+    # crushed below metabolic break-even (forage income < energy_decay), starving
+    # founding cohorts before they could bootstrap. 0.30 keeps food patchy (travel
+    # still required) while letting typical good-biome tiles sustain a forager.
+    sparse = rng.exponential(scale=0.30, size=(H, W)).astype(np.float32)
     sparse = np.clip(sparse, 0, 1)
     return np.clip(wild_food * sparse, 0, 1).astype(np.float32)
 
