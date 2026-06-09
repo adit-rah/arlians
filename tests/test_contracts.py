@@ -25,8 +25,11 @@ def test_simconfig_defaults_and_invariants():
     assert c.window_size == 15
     assert c.genome_dim == 6
     assert c.n_symbols == 8
-    # individual-fitness reward: homeostasis (w_h) + alive (w_a) + reproduction (w_r)
-    assert c.w_h == 1.0 and c.w_a == 0.05 and c.w_r == 0.6
+    # innate-drive backbone reward: survival (w_a) + homeostasis (w_h) + reproduction
+    # (innate urge w_r_birth + deferred inclusive-fitness w_r_surv)
+    assert c.w_h == 1.0 and c.w_a == 0.1
+    assert c.w_r_birth == 0.08 and c.w_r_surv == 0.6
+    assert c.fitness_viable_age == 20
     # cost maps are dicts keyed by resource name
     assert c.wall_cost == {"stone": 3, "wood": 1}
     assert c.weapon_cost["minerals"] == 1

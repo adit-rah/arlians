@@ -27,6 +27,7 @@ import torch.optim as optim
 
 from sim.actions import build_mask, Action, N_PRIMARY
 from sim.simulation import Simulation, Actions
+from sim.metrics import _compute_specialization_index
 from .policy import ArlianPolicy, DEVICE
 from .rollout import SlotRolloutBuffer
 from sim.observe import vector_len as compute_vector_len
@@ -55,6 +56,17 @@ class RolloutStats:
         self.max_age = 0
         self.pop_sum = 0
         self.pop_steps = 0
+        # --- emergence metrics (strategies that are NEVER rewarded; their rise over
+        # training is the proof the innate-drive backbone produces civilization) ---
+        self.built = 0                            # cumulative structures built this rollout
+        self.struct_standing = 0                  # structures currently on the map (last step)
+        self.struct_standing_max = 0              # peak standing structures
+        M = sim.cfg.max_agents
+        self.n_symbols = sim.cfg.n_symbols
+        # per-slot action histogram (reset on death) -> specialization (division of labor)
+        self._act_hist = np.zeros((M, N_PRIMARY), dtype=np.int32)
+        # (signal, action) joint counts -> signal<->action mutual information (proto-language)
+        self._sig_act = np.zeros((self.n_symbols, N_PRIMARY), dtype=np.int64)
 
     def record(self, sim: Simulation, actions: Actions, info: Dict[str, Any]) -> None:
         store = sim.store
@@ -74,16 +86,53 @@ class RolloutStats:
             self.thermal_sum += float(store.thermal[idx].sum())
             self.age_sum     += float(store.age[idx].sum())
             self.max_age = max(self.max_age, int(store.age[idx].max()))
+            # division-of-labor: accumulate per-slot action counts. Zero dead/empty slots
+            # first so a recycled slot's histogram reflects only its current occupant.
+            self._act_hist[~living] = 0
+            np.add.at(self._act_hist, (idx, actions.primary[idx]), 1)
+            # proto-language: joint (emitted symbol, action) counts. last_signal holds this
+            # step's emit (set inside step()), clipped to [0, n_symbols).
+            sig = np.clip(store.last_signal[idx].astype(np.int64), 0, self.n_symbols - 1)
+            np.add.at(self._sig_act, (sig, actions.primary[idx]), 1)
+        cur_struct = int((sim.state.structure_type != 0).sum())
+        self.struct_standing = cur_struct
+        self.struct_standing_max = max(self.struct_standing_max, cur_struct)
+        self.built     += int(info.get("built", 0))
         self.foraged   += float(info.get("foraged", 0.0))
         self.harvested += float(info.get("harvested", 0.0))
         self.births    += int(info.get("births", 0))
         for cause, k in info.get("deaths_by_cause", {}).items():
             self.deaths[cause] = self.deaths.get(cause, 0) + int(k)
 
+    def _signal_action_mi_bits(self) -> float:
+        """Mutual information (bits) between emitted signal and primary action, from the
+        accumulated joint counts. >0 means signals carry action-predictive structure
+        (emergent communication); ~0 means signals are random noise."""
+        joint = self._sig_act.astype(np.float64)
+        total = joint.sum()
+        if total == 0:
+            return 0.0
+        joint /= total
+        p_s = joint.sum(axis=1, keepdims=True)
+        p_a = joint.sum(axis=0, keepdims=True)
+        expected = p_s * p_a
+        with np.errstate(divide="ignore", invalid="ignore"):
+            log_ratio = np.where(
+                (joint > 0) & (expected > 0),
+                np.log2(joint / np.where(expected > 0, expected, 1.0)),
+                0.0,
+            )
+        return max(0.0, float((joint * log_ratio).sum()))
+
     def summary(self) -> Dict[str, Any]:
         a = self.agentsteps or 1
         tot_food = self.foraged + self.harvested
         af = self.n_action / max(1, self.n_action.sum())
+        # Emergence metrics computed once at rollout end (per-agent loops too slow per-step).
+        hist = {
+            i: self._act_hist[i]
+            for i in np.flatnonzero(self._act_hist.sum(axis=1) > 0)
+        }
         return {
             "pct_farmed":     float(self.harvested / tot_food) if tot_food > 0 else 0.0,
             "fertile_occ":    self.on_fertile / a,
@@ -99,6 +148,12 @@ class RolloutStats:
             "pop_mean":       self.pop_sum / max(1, self.pop_steps),
             "action_frac":    {Action(i).name: round(float(af[i]), 3)
                                for i in range(N_PRIMARY) if af[i] > 0.005},
+            # emergent strategies (never rewarded — their rise = the backbone working)
+            "structures_built":      int(self.built),
+            "structures_standing":   int(self.struct_standing),
+            "structures_peak":       int(self.struct_standing_max),
+            "specialization_index":  round(_compute_specialization_index(hist), 4),
+            "signal_action_mi":      round(self._signal_action_mi_bits(), 4),
         }
 
 
@@ -111,6 +166,23 @@ LR         = 3e-4
 GAMMA      = 0.995
 LAM        = 0.95
 BATCH_SIZE = 256   # minibatch size for update step
+
+# Bump when the reward objective changes incompatibly — guards against resuming an old
+# checkpoint (value head trained on a different return distribution) onto the new reward.
+REWARD_VERSION = 2
+
+
+def reward_schedule(update_i: int, cfg) -> Dict[str, float]:
+    """Anneal the SCAFFOLDING coefficients over training. The PERMANENT instinct terms
+    (w_a / w_h / w_r_birth / w_r_surv) are deliberately NOT scheduled. Returns:
+      beta_intr: intrinsic-novelty weight, intr_init -> 0 linearly over intr_anneal_updates.
+      ent_coef:  PPO entropy bonus, ent_init -> ent_floor linearly over ent_anneal_updates.
+    """
+    bi = cfg.intr_init * (1.0 - update_i / max(1, cfg.intr_anneal_updates))
+    beta_intr = float(min(cfg.intr_init, max(0.0, bi)))
+    frac = min(1.0, update_i / max(1, cfg.ent_anneal_updates))
+    ent_coef = float(max(cfg.ent_floor, cfg.ent_init - (cfg.ent_init - cfg.ent_floor) * frac))
+    return {"beta_intr": beta_intr, "ent_coef": ent_coef}
 
 
 def collect(
@@ -216,6 +288,7 @@ def update(
     buffer: SlotRolloutBuffer,
     policy: ArlianPolicy,
     optimizer: optim.Optimizer,
+    ent_coef: float = ENT_COEF,
 ) -> Dict[str, float]:
     """
     PPO-clip update over the filled buffer (build-spec §3.2).
@@ -264,7 +337,7 @@ def update(
             entropy_loss = -entropy.mean()
 
             # ---- Total loss ----
-            loss = policy_loss + VALUE_COEF * value_loss + ENT_COEF * entropy_loss
+            loss = policy_loss + VALUE_COEF * value_loss + ent_coef * entropy_loss
 
             optimizer.zero_grad()
             loss.backward()
@@ -304,12 +377,25 @@ def save_checkpoint(path: str, policy, optimizer, update_i: int, history: list) 
         "optimizer": optimizer.state_dict(),
         "update_i":  update_i,          # next update index to run
         "history":   history,
+        "reward_version": REWARD_VERSION,
     }, path)
 
 
 def load_checkpoint(path: str, policy, optimizer) -> tuple:
-    """Restore from a checkpoint. Returns (start_update, history)."""
+    """Restore from a checkpoint. Returns (start_update, history).
+
+    Refuses to resume a checkpoint written under a different reward objective: the value
+    head was trained to predict a different return distribution, so warm-starting it would
+    inject large value-loss and corrupt advantages. Start a fresh run instead.
+    """
     ckpt = torch.load(path, map_location=DEVICE)
+    ckpt_ver = int(ckpt.get("reward_version", 1))
+    if ckpt_ver != REWARD_VERSION:
+        raise ValueError(
+            f"checkpoint reward_version={ckpt_ver} != current {REWARD_VERSION}: the reward "
+            f"objective changed (instinct-backbone overhaul). Start a FRESH run — do not "
+            f"resume old weights onto the new objective."
+        )
     policy.load_state_dict(ckpt["policy"])
     optimizer.load_state_dict(ckpt["optimizer"])
     return int(ckpt["update_i"]), list(ckpt.get("history", []))
@@ -381,6 +467,12 @@ def train(
                     flush=True,
                 )
 
+        # Anneal the scaffolding coefficients for this update. beta_intr is read by
+        # sim.step() (mutable attribute — avoids touching the frozen step() signature);
+        # ent_coef is threaded into the PPO update below.
+        sched = reward_schedule(update_i, sim.cfg)
+        sim._beta_intr = sched["beta_intr"]
+
         print(
             f"[train] {update_i + 1}/{n_updates} collecting rollout ({T} steps)...",
             flush=True,
@@ -400,7 +492,7 @@ def train(
         n_living = int(sim.store.n_living_agents())
 
         # ---- update ----
-        loss_dict = update(buffer, policy, optimizer)
+        loss_dict = update(buffer, policy, optimizer, ent_coef=sched["ent_coef"])
 
         row: Dict[str, Any] = {
             "update":       update_i,

@@ -98,10 +98,29 @@ class SimConfig:
     catastrophe_radius: int = 20        # affected-region radius (tiles)
     catastrophe_magnitude: float = 0.5  # severity multiplier (event_mask value in region)
 
-    # ----- reward (individual fitness: homeostasis + survival + reproduction) -----
-    w_h: float = 1.0                    # weight on homeostatic comfort term
-    w_a: float = 0.05                   # per-step alive bonus
-    w_r: float = 0.6                    # bonus to parent per successful birth (fitness term)
+    # ----- reward (innate-drive backbone: survival + homeostasis + fitness) -----
+    # Innate, PERMANENT instincts (never annealed): hunger/thirst/warmth and the urge to
+    # reproduce. Strategies (farm/build/store/craft/defend/signal) are NEVER rewarded
+    # directly — they must EMERGE as the instrumentally-optimal way to keep these drives
+    # satisfied over a long life. Survival is the priority (death ends the reward stream).
+    w_a: float = 0.1                    # per-step survival bonus (priority backbone)
+    w_h: float = 1.0                    # homeostatic instinct weight: w_h*cbrt(E*H*T), Liebig min
+    w_r_birth: float = 0.08             # small innate reproductive urge (never fully suppressible)
+    w_r_surv: float = 0.6               # deferred inclusive-fitness payout: parent rewarded when a
+                                        #   child survives to viability (dominant reproduction term)
+    fitness_viable_age: int = 20        # child age (=repro_cooldown) at which parent collects w_r_surv
+
+    # ----- intrinsic curiosity (SCAFFOLDING ONLY — annealed to 0 during training) -----
+    # Count-based novelty over (drive bins, food, tile water/wild) so agents discover how to
+    # fix a low drive past the food-economy wall. Never rewards a specific strategy.
+    intr_init: float = 0.05             # intrinsic weight beta_intr at update 0
+    intr_anneal_updates: int = 250      # beta_intr decays linearly to 0 over this many updates
+    novelty_bins_drive: int = 4         # quantization buckets per drive (E/H/T)
+
+    # ----- entropy schedule (early exploration -> crisp converged policy) -----
+    ent_init: float = 0.01              # entropy coefficient at update 0
+    ent_floor: float = 0.003            # entropy coefficient floor (late training)
+    ent_anneal_updates: int = 400       # updates over which entropy decays init -> floor
 
     # ----- curriculum -----
     D_init: float = 0.3                 # initial difficulty scalar in [0,1]

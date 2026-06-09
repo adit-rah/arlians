@@ -81,9 +81,16 @@ class EntityStore:
     inv_minerals: np.ndarray     # f32
     weapon: np.ndarray           # bool (phase 6)
     # lineage / reproduction (phase 5)
-    lineage_id: np.ndarray       # i32 — family id
+    lineage_id: np.ndarray       # i32 — family id (shared by all descendants of a founder)
     repro_cd: np.ndarray         # i32 — reproduction cooldown counter
     genome: np.ndarray           # f32 (M, G) — evolvable body traits; neutral 0.5
+    # inclusive-fitness link (reward overhaul): a DIRECT parent->child pointer so a parent
+    # can be paid deferred fitness credit when its child survives to viability. birth_id is a
+    # globally-unique stamp per agent; the (parent_slot, parent_birth_id) pair lets the reward
+    # verify a parent slot still holds the SAME agent before paying (slots get recycled).
+    parent_slot: np.ndarray      # i32 — slot of this agent's parent (-1 = founder / none)
+    parent_birth_id: np.ndarray  # i64 — parent's birth_id captured at this agent's birth (-1 = none)
+    birth_id: np.ndarray         # i64 — globally-unique id stamped at each birth/seed (0 = unset)
     # signaling (phase 7)
     last_signal: np.ndarray      # i8 — symbol emitted last step
 
@@ -111,6 +118,9 @@ class EntityStore:
             lineage_id=np.full(M, -1, dtype=np.int32),
             repro_cd=zi(),
             genome=np.full((M, cfg.genome_dim), 0.5, dtype=np.float32),
+            parent_slot=np.full(M, -1, dtype=np.int32),
+            parent_birth_id=np.full(M, -1, dtype=np.int64),
+            birth_id=np.zeros(M, dtype=np.int64),
             last_signal=np.zeros(M, dtype=np.int8),
         )
 

@@ -57,6 +57,34 @@ class Simulation:
         self.store = EntityStore.create(cfg)
         self.t: int = 0
 
+        # Reward overhaul: intrinsic-curiosity weight, set per-update by the trainer's
+        # anneal schedule and 0 outside training (so a bare step() carries no novelty term);
+        # plus the global count-based novelty visit table that backs that bonus.
+        self._beta_intr: float = 0.0
+        self._novelty_counts: np.ndarray = self._new_novelty_counts()
+
+    def _new_novelty_counts(self) -> np.ndarray:
+        """Fresh zeroed visit-count table for the count-based novelty bonus.
+        Buckets: drive_bins^3 (E,H,T) × food(3) × tile-water(2) × tile-wild(2)."""
+        b = self.cfg.novelty_bins_drive
+        self._novelty_shape = (b, b, b, 3, 2, 2)
+        return np.zeros(self._novelty_shape, dtype=np.int64)
+
+    def _novelty_bucket(self, idx: np.ndarray) -> tuple:
+        """Discretize each agent's drive/resource state into novelty-table coordinates."""
+        store = self.store
+        b = self.cfg.novelty_bins_drive
+        clipb = lambda v: np.clip((v * b).astype(np.int64), 0, b - 1)  # noqa: E731
+        e = clipb(store.energy[idx])
+        h = clipb(store.hydration[idx])
+        th = clipb(store.thermal[idx])
+        food = np.clip((store.inv_food[idx] * 2.0).astype(np.int64), 0, 2)
+        ys, xs = store.y[idx], store.x[idx]
+        water_prox = self.world.base_resources["water_proximity"]
+        has_water = (water_prox[ys, xs] >= self.cfg.drink_min_water).astype(np.int64)
+        has_wild = (self.state.wild_remaining[ys, xs] > 0.0).astype(np.int64)
+        return (e, h, th, food, has_water, has_wild)
+
     # ---- contract surface ----
     def reset(self, seed: Optional[int] = None) -> Obs:
         """Allocate fresh state and seed `init_agents` at spawn-eligible tiles.
@@ -98,6 +126,12 @@ class Simulation:
         self.store.age[slots]         = 0
         self.store.genome[slots]      = 0.5   # neutral body traits
         self.store.lineage_id[slots]  = slots  # each agent starts its own lineage
+        # Founders are not children: parent_slot/parent_birth_id stay -1 (fresh from create).
+        # Stamp each with a unique birth_id (1..n) so later reuse keeps ids monotonic.
+        self.store.birth_id[slots]    = np.arange(1, n + 1, dtype=np.int64)
+
+        # Fresh cohort => fresh curiosity map (also covers the survival-sim reset-floor reseed).
+        self._novelty_counts = self._new_novelty_counts()
 
         return self.observe()
 
@@ -137,6 +171,11 @@ class Simulation:
         self.store.genome[slots]      = 0.5
         self.store.lineage_id[slots]  = slots
         self.store.repro_cd[slots]    = 0
+        # Respawned agents are fresh founders, not children (parent_slot/parent_birth_id were
+        # cleared to -1 on death). Stamp a unique monotonic birth_id so the identity guard
+        # rejects any stale parent reference to this recycled slot.
+        base = int(self.store.birth_id.max()) + 1
+        self.store.birth_id[slots]    = base + np.arange(slots.size, dtype=np.int64)
         return slots
 
     def step(self, actions: Actions) -> StepOut:
@@ -406,43 +445,33 @@ class Simulation:
         )
 
         # ------------------------------------------------------------------
-        # 7. Reward (§1.7): individual-fitness reward = homeostasis + reproduction
-        #    comfort = cbrt(energy * hydration * thermal)   (geometric mean)
-        #    r = cfg.w_h * comfort + cfg.w_a   for living agents (including
-        #        the just-died ones who get their final-step reward before done)
-        #      + cfg.w_r for each agent that successfully reproduced this step
-        #    r = 0 for slots that were already dead before this step
-        #
-        #    Geometric mean (Liebig's law of the minimum): comfort is capped by the
-        #    WEAKEST drive, so a full hydration meter can't paper over a starving
-        #    energy level. This kills the over-drinking local optimum that an
-        #    averaged comfort permits (max the cheap drive, ignore the expensive
-        #    one). Still purely homeostatic: a function of the three drives only.
-        #    Range is identical to the average: [0, 1], and =1 only when all drives
-        #    are full, so r stays in (w_a, w_h + w_a].
+        # 7. Reward — innate-drive backbone (reward overhaul).
+        #    Permanent instincts (never annealed):
+        #      survival:    cfg.w_a per step alive. The PRIORITY — death ends the reward
+        #                   stream, so over a long discounted horizon survival dominates.
+        #      homeostasis: cfg.w_h * cbrt(E*H*T). Geometric mean = Liebig's law of the
+        #                   minimum: comfort is capped by the WEAKEST drive, so a full
+        #                   hydration meter can't paper over a starving energy level (kills
+        #                   the over-drinking local optimum). A pure function of the drives.
+        #      reproduction: a small innate urge (cfg.w_r_birth) per birth PLUS a dominant
+        #                   DEFERRED inclusive-fitness payout (cfg.w_r_surv) paid to the
+        #                   parent the step its child reaches viability age — so breeding
+        #                   only pays when offspring actually survive (self-regulating
+        #                   against breed-to-death; never fully suppressible via the urge).
+        #    Scaffolding (annealed to 0 by the trainer via self._beta_intr):
+        #      intrinsic novelty: count-based curiosity over drive/resource state, to
+        #                   bootstrap past the food-economy wall.
+        #    Strategies (farm/build/store/craft/defend/signal) are NEVER rewarded here —
+        #    they must EMERGE as the instrumentally-optimal way to satisfy the instincts.
         # ------------------------------------------------------------------
         M = cfg.max_agents
         reward = np.zeros(M, dtype=np.float32)
 
-        # Agents alive at start of reward computation = those still alive OR those
-        # that just died this step (they get the final-step comfort before reset).
-        was_active = living  # living as of start of step (before deaths this step)
-        # done_mask agents were living (was_active) and just died — give them reward
-        # based on their final drive state (which is zeroed in resolve_deaths, but
-        # we read the comfort from the values that were set before we called
-        # resolve_deaths — however health/energy are zeroed by resolve_deaths).
-        # To give the last-step reward correctly we need to read before death clears
-        # them. Since resolve_deaths runs first, the drives of dead agents are already
-        # 0. We can live with that (comfort=0 for just-died agents) — it is still
-        # consistent: a dying agent gets r = w_a (alive bonus) * 0 comfort.
-        # Actually §1.7 says "done ... gets r for the final step then done", which
-        # means we DO want to give the final reward. The safest interpretation is to
-        # compute comfort from the current (post-death-zeroing) state: dead agents have
-        # comfort=0 so r = w_a * 0 + w_a = w_a, but since they are in done_mask we
-        # emit that for the final step. Agents still alive get full comfort.
-        #
-        # Implementation: reward any slot that was in `living` OR in `done_mask`
-        # (i.e., was alive at the start of this step).
+        # Survival + homeostasis for every slot that was alive at the start of this step
+        # (still alive OR just died). resolve_deaths already zeroed the just-died slots'
+        # drives, so their comfort is 0 and they collect only the cfg.w_a survival base —
+        # consistent with a dying agent getting its final-step reward before `done`.
+        was_active = living  # living as of the start of this step (before deaths)
         reward_idx = np.flatnonzero(was_active | done_mask)
         if reward_idx.size > 0:
             comfort = np.cbrt(
@@ -452,15 +481,47 @@ class Simulation:
             )
             reward[reward_idx] = (cfg.w_h * comfort + cfg.w_a).astype(np.float32)
 
-        # Reproduction bonus: pay the parent for each successful birth (fitness term).
-        # reproduced_slots are a subset of the living agents already rewarded above;
-        # this adds w_r on top. Parents that reproduced then died this step are in
-        # done_mask and still receive it as their final-step reward.
+        # Innate reproductive urge: small per-birth bonus so PPO never fully suppresses
+        # breeding. Kept small vs. comfort so survival stays the priority.
         if reproduced_slots.size > 0:
-            reward[reproduced_slots] += np.float32(cfg.w_r)
+            reward[reproduced_slots] += np.float32(cfg.w_r_birth)
 
-        # Slots that are dead and NOT in done_mask (already dead before this step)
-        # keep reward=0 (set at initialization above).
+        # Deferred inclusive fitness: pay a parent cfg.w_r_surv the step its child reaches
+        # viability age. The (parent_slot, parent_birth_id) identity guard pays only if that
+        # slot STILL holds the same parent — slots get recycled. If the parent is dead or
+        # its slot was reused, the credit is DROPPED (inclusive fitness already accrued to
+        # the genome via selection: the child lived). This is the true, spam-proof fitness
+        # signal that replaces the old flat per-birth bonus.
+        living_now = store.living_agents_mask()
+        viable = (
+            living_now
+            & (store.age == cfg.fitness_viable_age)
+            & (store.parent_slot >= 0)
+        )
+        viable_idx = np.flatnonzero(viable)
+        if viable_idx.size > 0:
+            psl = store.parent_slot[viable_idx]
+            same = store.alive[psl] & (store.birth_id[psl] == store.parent_birth_id[viable_idx])
+            paid = psl[same]
+            if paid.size > 0:
+                # np.add.at so a parent with two children maturing the same step gets 2×.
+                np.add.at(reward, paid, np.float32(cfg.w_r_surv))
+
+        # Intrinsic curiosity (SCAFFOLDING; self._beta_intr is annealed to 0 by the trainer
+        # and 0 outside training). Reward inverse-sqrt rarity of each agent's discretized
+        # (drive-bin, food, tile-water, tile-wild) state, then bump its visit count. This
+        # pushes agents to DISCOVER how to fix a low drive (eat when starving, drink when
+        # thirsty) past the food-economy wall — without rewarding any specific strategy.
+        if self._beta_intr > 0.0:
+            alive_idx = np.flatnonzero(living_now)
+            if alive_idx.size > 0:
+                counts = self._novelty_counts.reshape(-1)
+                flat = np.ravel_multi_index(self._novelty_bucket(alive_idx), self._novelty_shape)
+                r_nov = 1.0 / np.sqrt(counts[flat].astype(np.float32) + 1.0)
+                reward[alive_idx] += np.float32(self._beta_intr) * r_nov
+                np.add.at(counts, flat, 1)  # np.add.at handles repeated buckets in one step
+
+        # Slots dead before this step keep reward=0 (set at initialization above).
 
         # ------------------------------------------------------------------
         # 8. Observations + return

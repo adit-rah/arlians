@@ -144,6 +144,11 @@ def resolve_deaths(
     store.lineage_id[idx]   = -1
     store.repro_cd[idx]     = 0
     store.genome[idx]       = 0.5   # reset to neutral genome
+    store.parent_slot[idx]     = -1
+    store.parent_birth_id[idx] = -1
+    # birth_id is intentionally NOT reset: it stays monotonic so a reused slot is stamped
+    # with a fresh unique id, and the (parent_slot, parent_birth_id) identity guard in the
+    # reward then rejects any stale parent reference pointing at the recycled slot.
     store.last_signal[idx]  = 0
 
     return died_mask
@@ -200,6 +205,10 @@ def reproduce(
     G = cfg.genome_dim
     births = 0
 
+    # Globally-unique, monotonic birth_id base for children born this call. birth_id is
+    # never reset on death, so max()+1 always exceeds every id ever assigned -> unique.
+    base_birth_id = int(store.birth_id.max()) + 1
+
     # We track which slots have been allocated this call to avoid double-allocation.
     # Rebuild free list once; remove from it as we allocate.
     free = list(store.free_slots())
@@ -235,6 +244,10 @@ def reproduce(
         store.genome[child]       = child_genome
         store.lineage_id[child]   = int(store.lineage_id[parent])
         store.repro_cd[child]     = cfg.repro_cooldown
+        # --- inclusive-fitness link: stamp parent pointer + unique birth id ---
+        store.parent_slot[child]     = int(parent)
+        store.parent_birth_id[child] = int(store.birth_id[parent])
+        store.birth_id[child]        = base_birth_id + births
         # inventory zeroed (slots are cleared by resolve_deaths, but be explicit)
         store.inv_food[child]     = np.float32(0.0)
         store.inv_wood[child]     = np.float32(0.0)
