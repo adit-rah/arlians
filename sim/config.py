@@ -26,7 +26,10 @@ class SimConfig:
     init_agents: int = 256          # agents seeded at spawn-eligible tiles on reset
 
     # ----- drives (per-step, at genome-neutral body) -----
-    energy_decay: float = 0.04      # ~25 days to starve from full
+    energy_decay: float = 0.03      # ~33 days to starve from full. Cut from 0.04: energy is the
+                                    # EQUILIBRIUM drive (income=decay at steady state), so the policy
+                                    # plateaued at ~0.43 under 0.04 even after the wild-food boost.
+                                    # Lowering the drain raises where energy settles -> reach 0.55 repro surplus.
     hydration_decay: float = 0.06   # ~17 days to dehydrate from full
     thermal_target_temp: float = 0.45   # effective temp at/above this -> thermal recovers
     thermal_decay: float = 0.08     # thermal lost/step when cold & unsheltered (×curriculum D)
@@ -44,8 +47,11 @@ class SimConfig:
 
     # ----- food economy -----
     eat_restore: float = 0.6        # energy restored per unit food eaten
-    forage_yield: float = 0.4       # food gained foraging a full wild tile
-    forage_regen: float = 0.004     # wild_remaining regrow/step toward seasonal cap
+    forage_yield: float = 0.6       # food gained foraging a full wild tile (raised 0.4->0.6 so each
+                                    # forage on a now-abundant rich tile banks more energy per cycle)
+    forage_regen: float = 0.008     # wild_remaining regrow/step toward seasonal cap (~125 steps
+                                    # to refill; fast enough that a SETTLED cohort doesn't deplete
+                                    # its local food faster than it regrows)
     carry_capacity: float = 1.0     # base inventory food cap (×genome capacity)
     storage_capacity: float = 10.0  # food held per storage structure
     spoilage_carried: float = 0.01  # food lost/step in inventory
@@ -83,7 +89,12 @@ class SimConfig:
     pred_attack_damage: float = 0.2
 
     # ----- reproduction / genome -----
-    repro_energy_threshold: float = 0.55 # min energy to reproduce
+    repro_energy_threshold: float = 0.45 # min energy to reproduce. Lowered from 0.55: the geomean
+                                         # comfort reward gives no incentive to push energy past ~0.48,
+                                         # so a 0.55 gate sat ABOVE where the policy parks energy and
+                                         # masked REPRODUCE out almost always (births -> 0). 0.45 puts the
+                                         # gate just below the parked level so the standing population is
+                                         # eligible; w_r_birth then drives them to actually breed.
     repro_energy_cost: float = 0.4      # energy spent by parent
     repro_cooldown: int = 20            # steps before an agent can reproduce again
     genome_dim: int = 6                 # G: per-agent evolvable body-trait vector length
@@ -105,9 +116,16 @@ class SimConfig:
     # satisfied over a long life. Survival is the priority (death ends the reward stream).
     w_a: float = 0.1                    # per-step survival bonus (priority backbone)
     w_h: float = 1.0                    # homeostatic instinct weight: w_h*cbrt(E*H*T), Liebig min
-    w_r_birth: float = 0.08             # small innate reproductive urge (never fully suppressible)
-    w_r_surv: float = 0.6               # deferred inclusive-fitness payout: parent rewarded when a
-                                        #   child survives to viability (dominant reproduction term)
+    w_r_birth: float = 0.25             # innate reproductive urge. At 0.08 it was too weak — a trained
+                                        # policy parked energy just below the gate and SUPPRESSED births
+                                        # (REPRODUCE's 0.4-energy comfort crater outweighed the urge).
+                                        # 0.25 makes the instinct strong enough to act on. Watch for
+                                        # breed-to-death (births spiking while mean_age craters) -> lower it.
+    w_r_surv: float = 1.2               # deferred inclusive-fitness payout: parent rewarded when a child
+                                        #   survives to viability. Raised 0.6->1.2: REPRODUCE costs 0.4
+                                        #   energy -> ~13 steps of depressed geomean comfort (~ -1.4 reward),
+                                        #   so at 0.6 the payoff didn't cover it and PPO suppressed births.
+                                        #   1.2 rewards the OUTCOME (a surviving child) enough to make it pay.
     fitness_viable_age: int = 20        # child age (=repro_cooldown) at which parent collects w_r_surv
 
     # ----- intrinsic curiosity (SCAFFOLDING ONLY — annealed to 0 during training) -----

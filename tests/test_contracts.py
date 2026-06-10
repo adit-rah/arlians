@@ -28,7 +28,7 @@ def test_simconfig_defaults_and_invariants():
     # innate-drive backbone reward: survival (w_a) + homeostasis (w_h) + reproduction
     # (innate urge w_r_birth + deferred inclusive-fitness w_r_surv)
     assert c.w_h == 1.0 and c.w_a == 0.1
-    assert c.w_r_birth == 0.08 and c.w_r_surv == 0.6
+    assert c.w_r_birth == 0.25 and c.w_r_surv == 1.2
     assert c.fitness_viable_age == 20
     # cost maps are dicts keyed by resource name
     assert c.wall_cost == {"stone": 3, "wood": 1}
